@@ -152,11 +152,17 @@ def read_fahp_workbook(path, n_criteria=None):
                 )
             available = available[:n_criteria]
 
-        rows.append(available)
+        from .fahp import saaty_linguistic2num
+        numeric_row = [
+            saaty_linguistic2num(x)
+            for x in available
+        ]
+        rows.append(numeric_row)
 
     from .fahp import group_weights_from_reference_rows
 
     result = group_weights_from_reference_rows(rows)
+    result["reference_rows"] = rows
     result["sheets"] = expert_sheets
     result["expert_names"] = expert_sheets
     return result

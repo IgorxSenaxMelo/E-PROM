@@ -18,6 +18,7 @@ from core.data_loader import (
 from core.e_prom_core import run_e_prom
 from core.fuzzy_numbers import defuzz_coa
 from core.cpp import cpp_normal
+from core.monte_carlo import run_e_prom_monte_carlo
 
 
 st.set_page_config(
@@ -319,6 +320,71 @@ def plot_rank_heatmap(data, result):
     return fig
 
 
+
+def plot_mc_rank_acceptability(data, mc):
+    labels = [str(x) for x in data["ids"]]
+    order = np.argsort(mc["mean_rank"])
+    M = mc["rank_acceptability"][order, :]
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=M,
+            x=list(range(1, len(labels) + 1)),
+            y=[labels[i] for i in order],
+            text=np.vectorize(lambda x: f"{x:.1f}%")(M),
+            texttemplate="%{text}",
+            colorscale="Blues",
+            zmin=0,
+            zmax=max(1, np.nanmax(M)),
+            colorbar=dict(title="%"),
+        )
+    )
+    fig.update_layout(
+        title="CPP/Monte Carlo — aceitabilidade das posições",
+        xaxis_title="Posição",
+        yaxis_title="Alternativa",
+        height=max(550, len(labels) * 30),
+    )
+    return fig
+
+
+def plot_mc_outworking(data, mc):
+    labels = [str(x) for x in data["ids"]]
+    order = np.argsort(-mc["outranking_acceptability"].sum(axis=1))
+    M = mc["outranking_acceptability"][np.ix_(order, order)]
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=M,
+            x=[labels[i] for i in order],
+            y=[labels[i] for i in order],
+            colorscale="Blues",
+            zmin=0,
+            zmax=100,
+            colorbar=dict(title="%"),
+        )
+    )
+    fig.update_layout(
+        title="CPP/Monte Carlo — aceitabilidade de sobreclassificação",
+        xaxis_title="Alternativa sobreclassificada",
+        yaxis_title="Alternativa que sobreclassifica",
+        height=700,
+    )
+    return fig
+
+
+def mc_summary_df(data, mc):
+    return pd.DataFrame({
+        "Alternativa": data["ids"],
+        "Posição média": mc["mean_rank"],
+        "DP posição": mc["std_rank"],
+        "Freq. 1º lugar": 100 * mc["freq_top1"],
+        "Phi médio": mc["mean_phi"],
+        "DP Phi": mc["std_phi"],
+    }).sort_values(
+        "Posição média"
+    ).reset_index(drop=True)
+
 # ================================================================
 # HEADER
 # ================================================================
@@ -330,6 +396,234 @@ st.subheader(
 st.caption(
     "FAHP-Express + Fuzzy PROMETHEE — método generalizado."
 )
+
+GUIDE_TEXT = """# E-PROM — Guide
+
+## 1. Objetivo
+
+O E-PROM (Express Fuzzy Preference Ranking with PROMETHEE) combina:
+
+**FAHP-Express → pesos fuzzy dos critérios → Fuzzy PROMETHEE**
+
+O método mantém os pesos fuzzy durante o Fuzzy PROMETHEE e realiza a
+defuzzificação dos fluxos no final.
+
+---
+
+## 2. Arquivo de avaliações
+
+A planilha de avaliações deve possuir:
+
+- uma aba por especialista;
+- uma última aba chamada `Guide`, que não é processada;
+- coluna A: ID da alternativa;
+- coluna B: descrição;
+- coluna C em diante: critérios.
+
+Todos os especialistas devem usar os mesmos IDs, descrições e nomes de critérios.
+
+### Exemplo
+
+| ID | Descrição | Impacto | Custo | Prazo |
+|---|---|---:|---:|---:|
+| R1 | Alternativa 1 | 7 | 300000 | 12 |
+| R2 | Alternativa 2 | 5 | 250000 | 18 |
+
+---
+
+## 3. Tipo do critério
+
+### Ordinal
+
+Use quando a avaliação é uma escala ordenada, por exemplo:
+
+- 1–5;
+- 1–7;
+- 1–9.
+
+Funções permitidas:
+
+- **Usual**
+- **Level**
+
+O valor ordinal é convertido para um número fuzzy trapezoidal.
+
+### Contínuo
+
+Use para grandezas como:
+
+- custo em R$;
+- prazo em meses;
+- distância;
+- tempo;
+- consumo;
+- desempenho físico.
+
+Funções permitidas:
+
+- **U-shape**
+- **V-shape**
+- **Linear**
+
+O valor permanece na unidade original. Não é convertido para 1–7.
+
+---
+
+## 4. Limiar q e p
+
+### U-shape
+
+`q` representa o limiar de indiferença.
+
+### V-shape
+
+`p` representa o limiar de preferência.
+
+### Linear
+
+Usa os dois:
+
+- `q`: limiar de indiferença;
+- `p`: limiar de preferência.
+
+Sempre use a unidade original do critério.
+
+Exemplo:
+
+Custo em reais:
+
+`q = 10000`
+
+`p = 50000`
+
+Prazo em meses:
+
+`q = 1`
+
+`p = 4`
+
+---
+
+## 5. FAHP-Express
+
+Na planilha FAHP-Express, cada especialista informa uma linha de referência
+a partir da célula B4.
+
+A linha deve possuir exatamente o mesmo número de critérios da planilha
+de avaliações.
+
+O E-PROM reconstrói as comparações par a par e calcula os pesos fuzzy pelo
+procedimento de Buckley.
+
+---
+
+## 6. Pesos fuzzy no Fuzzy PROMETHEE
+
+O E-PROM não defuzzifica os pesos antes do PROMETHEE.
+
+Para cada critério:
+
+`peso fuzzy × preferência fuzzy`
+
+Os termos são agregados para obter os fluxos fuzzy:
+
+- Φ+;
+- Φ−;
+- Φ líquido.
+
+A defuzzificação pelo centro de área é aplicada aos fluxos finais para
+obter o ranking.
+
+---
+
+## 7. Monte Carlo / CPP
+
+O módulo de Monte Carlo avalia a estabilidade do resultado.
+
+### Critérios ordinais
+
+A distribuição é **empírica**, construída diretamente a partir das
+respostas dos especialistas.
+
+Para cada alternativa e critério, uma resposta observada entre os
+especialistas é sorteada de acordo com sua frequência.
+
+Assim, se 10 especialistas responderam:
+
+`7, 7, 6, 5, 7, 6, 7, 4, 7, 6`
+
+a distribuição usada na simulação preserva essas frequências.
+
+### Critérios contínuos
+
+O usuário informa uma variação percentual.
+
+Exemplo:
+
+`20%`
+
+O valor observado `x` é simulado em:
+
+`[0,80x ; 1,20x]`
+
+por amostragem uniforme.
+
+A variação é configurada individualmente para cada critério contínuo.
+
+### Pesos
+
+Em cada iteração, os valores de referência do FAHP-Express também são
+reamostrados empiricamente a partir dos especialistas e um novo conjunto
+de pesos fuzzy é calculado.
+
+---
+
+## 8. Principais resultados do Monte Carlo
+
+O E-PROM calcula:
+
+- posição média;
+- desvio-padrão da posição;
+- Φ líquido médio;
+- desvio-padrão de Φ líquido;
+- frequência de 1º lugar;
+- matriz de aceitabilidade de ranking;
+- matriz de aceitabilidade de sobreclassificação PROMETHEE I;
+- distribuição dos pesos dos critérios.
+
+O módulo não possui classificação `KEY` nem grupos específicos do domínio
+militar.
+
+---
+
+## 9. Interpretação
+
+A análise probabilística deve ser usada como análise de estabilidade,
+não como substituição automática do ranking determinístico.
+
+Resultados úteis incluem:
+
+- frequência com que uma alternativa ocupa cada posição;
+- frequência de 1º lugar;
+- dispersão de Φ;
+- sensibilidade dos pesos;
+- probabilidade de sobreclassificação entre pares.
+
+---
+
+## 10. Fluxo recomendado
+
+1. Preparar as avaliações dos especialistas.
+2. Preparar o FAHP-Express.
+3. Configurar tipo e direção dos critérios.
+4. Selecionar a função de preferência.
+5. Definir q e/ou p.
+6. Executar o E-PROM determinístico.
+7. Verificar o ranking e as relações PROMETHEE I.
+8. Executar o Monte Carlo/CPP.
+9. Avaliar estabilidade e aceitabilidade das posições.
+10. Exportar os resultados.
+"""
 
 
 # ================================================================
@@ -650,12 +944,13 @@ if "result" in st.session_state:
         data["n_criteria"],
     )
 
-    tab1, tab2, tab3, tab4 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
         [
             "🏆 Ranking",
             "📈 PROMETHEE",
             "👥 Especialistas",
-            "🎲 CPP",
+            "🎲 CPP / Monte Carlo",
+            "📘 Guide",
         ]
     )
 
@@ -734,118 +1029,140 @@ if "result" in st.session_state:
 
     with tab4:
 
-        st.info(
-            "CPP é um módulo separado para critérios contínuos. "
-            "Informe os desvios-padrão por alternativa e critério."
+        st.subheader("CPP / Monte Carlo — estabilidade do E-PROM")
+
+        st.markdown(
+            "Para **critérios ordinais**, a incerteza é obtida empiricamente "
+            "das respostas dos especialistas. Para **critérios contínuos**, "
+            "informe a variação percentual ± desejada."
         )
 
         continuous_idx = [
-            i
-            for i, typ in enumerate(
-                config["Tipo"]
-            )
+            i for i, typ in enumerate(config["Tipo"])
             if typ == "Contínuo"
         ]
 
-        if not continuous_idx:
+        variation = []
+        for k, criterion in enumerate(data["criteria"]):
+            if k in continuous_idx:
+                default = 20.0
+                variation.append(
+                    st.number_input(
+                        f"Variação de {criterion} (%)",
+                        min_value=0.0,
+                        max_value=1000.0,
+                        value=default,
+                        step=5.0,
+                        key=f"mc_var_{k}",
+                        help="Aplica ± percentual ao valor observado de cada especialista.",
+                    )
+                )
+            else:
+                variation.append(0.0)
 
-            st.warning(
-                "Nenhum critério contínuo foi configurado."
-            )
-
-        else:
-
-            continuous_criteria = [
-                data["criteria"][i]
-                for i in continuous_idx
-            ]
-
-            std_df = pd.DataFrame(
-                0.0,
-                index=data["ids"],
-                columns=continuous_criteria,
-            )
-
-            std_input = st.data_editor(
-                std_df,
-                use_container_width=True,
-                key="cpp_std",
-            )
-
-            nsim = st.number_input(
-                "Simulações Monte Carlo",
-                min_value=1000,
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            n_mc = st.number_input(
+                "Número de simulações",
+                min_value=100,
                 max_value=500000,
-                value=10000,
-                step=1000,
+                value=2000,
+                step=100,
+                key="mc_n",
             )
-
+        with col2:
             seed = st.number_input(
                 "Seed",
                 min_value=0,
-                value=0,
+                value=42,
                 step=1,
+                key="mc_seed",
+            )
+        with col3:
+            st.metric(
+                "Critérios contínuos",
+                len(continuous_idx),
             )
 
-            if st.button(
-                "▶ Executar CPP",
-                type="primary",
-            ):
+        if st.button(
+            "▶ Executar CPP / Monte Carlo",
+            type="primary",
+            key="run_mc",
+        ):
 
-                expert_values = np.stack(
-                    [
-                        data["evaluations"][name]
-                        for name in data["expert_names"]
-                    ],
-                    axis=0,
-                )
+            # Usa diretamente as linhas de referência individuais
+            # fornecidas pelos especialistas no FAHP-Express.
+            reference_rows = np.asarray(
+                fahp["reference_rows"],
+                dtype=float,
+            )
 
-                X_all = np.mean(
-                    expert_values,
-                    axis=0,
-                )
+            mc = run_e_prom_monte_carlo(
+                data["evaluations"],
+                reference_rows,
+                types,
+                dirs,
+                prefs,
+                qs,
+                ps,
+                scales,
+                variation,
+                n_mc=int(n_mc),
+                seed=int(seed),
+            )
 
-                X = X_all[
-                    :,
-                    continuous_idx,
-                ]
+            st.session_state["mc"] = mc
 
-                S = std_input.to_numpy(
-                    dtype=float
-                )
+        if "mc" in st.session_state:
 
-                W = np.array([
-                    defuzz_coa(
-                        fahp["w_fuzzy_group"][i]
-                    )
-                    for i in continuous_idx
-                ])
+            mc = st.session_state["mc"]
 
-                cpp = cpp_normal(
-                    X,
-                    S,
-                    np.asarray(
-                        dirs
-                    )[continuous_idx],
-                    nsim=int(nsim),
-                    seed=int(seed),
-                    weights=W,
-                )
+            st.success(
+                f"Monte Carlo concluído: {mc['n_mc']:,} simulações."
+            )
 
-                cpp_df = pd.DataFrame({
+            st.dataframe(
+                mc_summary_df(data, mc),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.plotly_chart(
+                plot_mc_rank_acceptability(data, mc),
+                use_container_width=True,
+            )
+
+            st.plotly_chart(
+                plot_mc_outworking(data, mc),
+                use_container_width=True,
+            )
+
+            w_df = pd.DataFrame(
+                mc["W_samples"],
+                columns=data["criteria"],
+            )
+
+            st.subheader("Distribuição dos pesos")
+            st.dataframe(
+                w_df.describe().T[
+                    ["mean", "std", "min", "max"]
+                ],
+                use_container_width=True,
+            )
+
+            st.download_button(
+                "⬇️ Baixar resultados do Monte Carlo",
+                data=pd.DataFrame({
                     "Alternativa": data["ids"],
-                    "Prob. melhor": cpp["score"],
-                    "Rank CPP": cpp["rank"],
-                }).sort_values(
-                    "Rank CPP"
-                )
+                    "Posição média": mc["mean_rank"],
+                    "DP posição": mc["std_rank"],
+                    "Freq. 1º lugar (%)": 100 * mc["freq_top1"],
+                    "Phi médio": mc["mean_phi"],
+                    "DP Phi": mc["std_phi"],
+                }).to_csv(index=False).encode("utf-8-sig"),
+                file_name="E_PROM_CPP_MonteCarlo.csv",
+                mime="text/csv",
+            )
 
-                st.subheader(
-                    "Resultado CPP"
-                )
-
-                st.dataframe(
-                    cpp_df,
-                    use_container_width=True,
-                    hide_index=True,
-                )
+    with tab5:
+        st.markdown(GUIDE_TEXT)
