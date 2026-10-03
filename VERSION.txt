@@ -1,0 +1,2 @@
+E-PROM v7.3 — precisão individual por especialista e critério
+Esta versão NÃO exige precisão igual entre abas do FAHP-Express.
