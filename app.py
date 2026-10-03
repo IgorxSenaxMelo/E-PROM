@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from core.data_loader import (
+from core.data_loader_v73 import (
     read_expert_workbook,
     read_fahp_workbook,
 )
@@ -406,7 +406,7 @@ def mc_summary_df(data, mc):
 
 st.title("E-PROM")
 st.subheader(
-    "Express Fuzzy Preference Ranking with PROMETHEE"
+    "Express Fuzzy Preference Ranking with PROMETHEE — v7.3"
 )
 st.caption(
     "FAHP-Express + Fuzzy PROMETHEE — método generalizado."
@@ -462,7 +462,7 @@ GUIDE_TEXT = """# E-PROM — Guide
 
 ## 1. Objetivo
 
-O E-PROM (Express Fuzzy Preference Ranking with PROMETHEE) combina:
+O E-PROM (Express Fuzzy Preference Ranking with PROMETHEE — v7.3) combina:
 
 **FAHP-Express → pesos fuzzy dos critérios → Fuzzy PROMETHEE**
 
