@@ -1090,12 +1090,34 @@ if "result" in st.session_state:
             key="run_mc",
         ):
 
-            # Usa diretamente as linhas de referência individuais
-            # fornecidas pelos especialistas no FAHP-Express.
-            reference_rows = np.asarray(
-                fahp["reference_rows"],
-                dtype=float,
-            )
+            # Usa as linhas de referência individuais fornecidas pelos
+            # especialistas no FAHP-Express. Mantém compatibilidade com
+            # versões anteriores do data_loader que não armazenavam
+            # explicitamente `reference_rows`.
+            if "reference_rows" in fahp:
+                reference_rows = np.asarray(
+                    fahp["reference_rows"],
+                    dtype=float,
+                )
+            else:
+                # Fallback: A_individual preserva as razões v_j/v_i
+                # usadas para reconstruir o FAHP-Express. Como uma
+                # constante comum não altera as razões, a primeira linha
+                # da matriz pode ser usada como uma representação
+                # equivalente dos valores de referência para o MC.
+                A_individual = fahp.get("A_individual")
+                if A_individual is None:
+                    st.error(
+                        "Não foi possível recuperar as respostas de referência "
+                        "do FAHP-Express para o CPP/Monte Carlo. Reexecute o "
+                        "E-PROM com a planilha FAHP-Express atualizada."
+                    )
+                    st.stop()
+
+                reference_rows = np.asarray(
+                    [np.asarray(A, dtype=float)[0, :] for A in A_individual],
+                    dtype=float,
+                )
 
             mc = run_e_prom_monte_carlo(
                 data["evaluations"],
