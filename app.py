@@ -7,6 +7,12 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 ROOT=Path(__file__).resolve().parent; sys.path.insert(0,str(ROOT))
+TEMPLATES=ROOT/'templates'
+
+
+def load_template(name):
+    p=TEMPLATES/name
+    return p.read_bytes() if p.exists() else None
 from core.data_loader import read_expert_workbook, read_fahp_workbook
 from core.e_prom_core import run_e_prom
 from core.promethee import pref_trap
@@ -63,6 +69,17 @@ st.caption('FAHP-Express + Fuzzy PROMETHEE — versão generalizada, sem classif
 
 with st.sidebar:
     st.header('1. Dados')
+    st.markdown('### 📥 Arquivos-modelo')
+    eval_tpl=load_template('E_PROM_Avaliacoes_Modelo.xlsx')
+    fahp_tpl=load_template('E_PROM_FAHP_Express_Modelo.xlsx')
+    guide_path=TEMPLATES/'E_PROM_Guide.pdf'
+    if eval_tpl:
+        st.download_button('⬇️ Modelo — Avaliações', data=eval_tpl, file_name='E_PROM_Avaliacoes_Modelo.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True)
+    if fahp_tpl:
+        st.download_button('⬇️ Modelo — FAHP-Express', data=fahp_tpl, file_name='E_PROM_FAHP_Express_Modelo.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True)
+    if guide_path.exists():
+        st.download_button('📘 Guide (PDF)', data=guide_path.read_bytes(), file_name='E_PROM_Guide.pdf', mime='application/pdf', use_container_width=True)
+
     req_file=st.file_uploader('Planilha das avaliações',type=['xlsx'])
     fahp_file=st.file_uploader('Planilha FAHP-Express',type=['xlsx'])
     if req_file is not None:
@@ -72,6 +89,7 @@ with st.sidebar:
             criteria=preview['criteria']; ncrit=len(criteria)
             st.success(f'{ncrit} critérios detectados.')
             st.divider(); st.header('2. Configuração dos critérios')
+            st.info('Para cada critério, escolha primeiro se o dado é Ordinal ou Contínuo. Depois defina direção, função de preferência e, quando aplicável, os limiares q e p.')
             dirs=[]; types=[]; prefs=[]; qs=[]; ps=[]; scales=[]; rows=[]
             for k,c in enumerate(criteria):
                 st.markdown(f'**{c}**')

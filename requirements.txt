@@ -1,8 +1,8 @@
-numpy
-pandas
-openpyxl
-scipy
-scikit-learn
-plotly
 streamlit
-pytest
+pandas
+numpy
+openpyxl
+scikit-learn
+matplotlib
+plotly
+reportlab
