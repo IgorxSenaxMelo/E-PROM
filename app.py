@@ -826,9 +826,9 @@ with st.sidebar:
 
                     scale = 0
                     st.caption(
-                        "Na versão atual, o valor contínuo é tratado como "
-                        "fuzzy degenerado [x, x, x, x]. A incerteza adicional "
-                        "é tratada pelos limiares q/p e pelo CPP/Monte Carlo."
+                        "O valor contínuo é representado por um trapezoide fuzzy "
+                        "na unidade original. A largura do trapezoide é definida "
+                        "pela precisão informada na planilha FAHP-Express."
                     )
 
                     pref_name = st.selectbox(
@@ -1083,16 +1083,17 @@ if "result" in st.session_state:
             use_container_width=True,
         )
 
-        st.subheader("Precisão dos atributos contínuos")
+        st.subheader("Precisão dos atributos")
         precision_df = pd.DataFrame({
             "Critério": data["criteria"],
             "Precisão": fahp.get("precision_levels", ["Alta"] * len(data["criteria"])),
         })
         st.dataframe(precision_df, use_container_width=True, hide_index=True)
         st.caption(
-            "Para critérios contínuos, o valor x é representado por um trapezoide "
-            "fuzzy [x(1-rs), x(1-rc), x(1+rc), x(1+rs)]. Maior precisão implica "
-            "menor dispersão. Critérios ordinais continuam usando a escala linguística."
+            "A precisão aplica-se a atributos ordinais e contínuos. Alta = menor "
+            "incerteza, Média = representação padrão e Baixa = maior incerteza. "
+            "Para contínuos, a unidade original é preservada; para ordinais, "
+            "a representação linguística é contraída ou dilatada dentro dos limites da escala."
         )
 
         st.plotly_chart(

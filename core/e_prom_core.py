@@ -41,34 +41,39 @@ TFN_EVAL_9 = np.array([
 ])
 
 
-def fuzzify_ordinal(value, scale_max):
+def fuzzify_ordinal(value, scale_max, precision="Média"):
+    """Converte uma avaliação ordinal em trapezoide fuzzy.
+
+    A tabela linguística padrão representa a avaliação com precisão média.
+    O nível de precisão atua como um operador de contração/dilatação em
+    torno do valor ordinal observado, mantendo os limites da escala.
+
+    Alta  -> menor incerteza fuzzy
+    Média -> representação linguística padrão
+    Baixa -> maior incerteza fuzzy
+    """
     value = float(value)
     scale_max = int(scale_max)
-
     if abs(value - round(value)) > 1e-9:
-        raise ValueError(
-            f"Valor ordinal {value} não é inteiro."
-        )
-
+        raise ValueError(f"Valor ordinal {value} não é inteiro.")
     v = int(round(value))
-
     if v < 1 or v > scale_max:
-        raise ValueError(
-            f"Valor ordinal {v} fora da escala 1–{scale_max}."
-        )
-
+        raise ValueError(f"Valor ordinal {v} fora da escala 1–{scale_max}.")
     if scale_max == 5:
-        return TFN_EVAL_5[v - 1].copy()
-
-    if scale_max == 7:
-        return TFN_EVAL_7[v - 1].copy()
-
-    if scale_max == 9:
-        return TFN_EVAL_9[v - 1].copy()
-
-    raise ValueError(
-        "Escala ordinal suportada: 5, 7 ou 9."
-    )
+        base = TFN_EVAL_5[v - 1].copy()
+    elif scale_max == 7:
+        base = TFN_EVAL_7[v - 1].copy()
+    elif scale_max == 9:
+        base = TFN_EVAL_9[v - 1].copy()
+    else:
+        raise ValueError("Escala ordinal suportada: 5, 7 ou 9.")
+    factors = {"Alta": 0.5, "Média": 1.0, "Baixa": 1.5}
+    if precision not in factors:
+        raise ValueError(f"Precisão ordinal não reconhecida: {precision!r}. Use Alta, Média ou Baixa.")
+    factor = factors[precision]
+    fuzzy = v + factor * (base - v)
+    fuzzy = np.clip(fuzzy, 1.0, float(scale_max))
+    return np.sort(fuzzy.astype(float))
 
 
 PRECISION_DEFAULTS = {
@@ -78,7 +83,7 @@ PRECISION_DEFAULTS = {
     # podem ser sobrescritos no arquivo FAHP-Express.
     "Alta": (5.0, 2.0),
     "Média": (10.0, 4.0),
-    "Baixa": (16.6667, 6.6667),
+    "Baixa": (100.0 / 6.0, 20.0 / 3.0),
 }
 
 
@@ -175,6 +180,7 @@ def build_fuzzy_matrix(
                 F[i, k] = fuzzify_ordinal(
                     value,
                     scales[k],
+                    precision=str(precision_levels[k]),
                 )
 
             elif types[k] == "Contínuo":

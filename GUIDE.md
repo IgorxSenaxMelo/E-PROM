@@ -68,6 +68,8 @@ Funções permitidas:
 
 O valor permanece na unidade original. Não é convertido para 1–7.
 
+O valor contínuo x é representado como um trapezoide fuzzy cuja largura depende da precisão selecionada na planilha FAHP-Express.
+
 ---
 
 ## 4. Limiar q e p
@@ -105,7 +107,22 @@ Prazo em meses:
 
 ---
 
-## 5. FAHP-Express
+## 5. Precisão dos atributos
+
+Na planilha FAHP-Express, a segunda linha é a **Precisão do atributo**.
+Use apenas:
+
+- **Alta** — menor incerteza;
+- **Média** — representação fuzzy padrão;
+- **Baixa** — maior incerteza.
+
+A precisão é aplicável tanto a critérios ordinais quanto contínuos. Os parâmetros numéricos internos são padronizados pelo método e não precisam ser informados pelo usuário.
+
+Para critérios ordinais, a representação fuzzy linguística de precisão média é contraída ou dilatada em torno do valor observado. Para critérios contínuos, o trapezoide é construído diretamente na unidade original do atributo.
+
+Para um atributo ordinal v, a representação de precisão média é usada como base e as distâncias em relação a v são multiplicadas por um fator de precisão: Alta = 0,5; Média = 1,0; Baixa = 1,5. O trapezoide é então limitado aos extremos da escala ordinal. Para atributos contínuos, são usados os parâmetros internos: Alta = suporte ±5% e núcleo ±2%; Média = suporte ±10% e núcleo ±4%; Baixa = suporte ±16,6667% e núcleo ±6,6667%.
+
+## 6. FAHP-Express
 
 Na planilha FAHP-Express, cada especialista informa uma linha de referência
 a partir da célula B4.
@@ -118,7 +135,7 @@ procedimento de Buckley.
 
 ---
 
-## 6. Pesos fuzzy no Fuzzy PROMETHEE
+## 7. Pesos fuzzy no Fuzzy PROMETHEE
 
 O E-PROM não defuzzifica os pesos antes do PROMETHEE.
 
@@ -137,7 +154,7 @@ obter o ranking.
 
 ---
 
-## 7. Monte Carlo / CPP
+## 8. Monte Carlo / CPP
 
 O módulo de Monte Carlo avalia a estabilidade do resultado.
 
@@ -179,7 +196,7 @@ de pesos fuzzy é calculado.
 
 ---
 
-## 8. Principais resultados do Monte Carlo
+## 9. Principais resultados do Monte Carlo
 
 O E-PROM calcula:
 
@@ -197,7 +214,7 @@ militar.
 
 ---
 
-## 9. Interpretação
+## 10. Interpretação
 
 A análise probabilística deve ser usada como análise de estabilidade,
 não como substituição automática do ranking determinístico.
@@ -212,7 +229,7 @@ Resultados úteis incluem:
 
 ---
 
-## 10. Fluxo recomendado
+## 11. Fluxo recomendado
 
 1. Preparar as avaliações dos especialistas.
 2. Preparar o FAHP-Express.

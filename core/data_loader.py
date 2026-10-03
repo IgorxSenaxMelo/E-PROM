@@ -116,7 +116,7 @@ def read_fahp_workbook(path, n_criteria=None):
 
     Formato simplificado para o usuário:
       linha 4: comparação relativa ao critério de referência;
-      linha 5: precisão do atributo (Alta, Média, Baixa ou Não aplicável).
+      linha 5: precisão do atributo (Alta, Média ou Baixa).
 
     O primeiro critério é sempre o critério de referência e deve ser o mais
     importante. Portanto, sua comparação consigo mesmo é fixada em 1.
@@ -190,18 +190,16 @@ def read_fahp_workbook(path, n_criteria=None):
         else:
             precision = precision[:len(numeric_row)]
 
-        allowed = {"Alta", "Média", "Baixa", "Não aplicável", "Nao aplicavel"}
+        allowed = {"Alta", "Média", "Baixa"}
         normalized_precision = []
         for k, value in enumerate(precision):
             if value is None or (isinstance(value, float) and np.isnan(value)):
                 value = "Alta"
             value = str(value).strip()
-            if value == "Nao aplicavel":
-                value = "Não aplicável"
             if value not in allowed:
                 raise ValueError(
                     f"Aba FAHP {sheet!r}, critério {k+1}: precisão inválida {value!r}. "
-                    "Use Alta, Média, Baixa ou Não aplicável."
+                    "Use Alta, Média ou Baixa."
                 )
             normalized_precision.append(value)
 
@@ -215,10 +213,9 @@ def read_fahp_workbook(path, n_criteria=None):
                 "A configuração de precisão dos atributos deve ser igual em todas as abas do FAHP-Express."
             )
 
-    # Para critérios contínuos, a precisão deve ser Alta/Média/Baixa. Para
-    # critérios ordinais, use Não aplicável. Como a planilha FAHP não conhece
-    # automaticamente o tipo escolhido na interface, a validação estrita é
-    # feita posteriormente no app/core quando os tipos dos critérios estão disponíveis.
+    # A precisão é uma propriedade geral do atributo e se aplica tanto a
+    # critérios ordinais quanto contínuos. A transformação fuzzy específica
+    # de cada tipo é realizada no núcleo do E-PROM.
 
     from .fahp import group_weights_from_reference_rows
     result = group_weights_from_reference_rows(rows)
