@@ -110,14 +110,19 @@ def excel_bytes(data, result, config, fahp):
             sheet_name="Pesos_Fuzzy",
         )
 
-        precision_df = pd.DataFrame({
-            "Criterio": data["criteria"],
-            "Precisão": fahp.get("precision_levels", ["Alta"] * len(data["criteria"])),
-        })
+        precision_matrix = fahp.get(
+            "precision_levels",
+            [["Alta"] * len(data["criteria"]) for _ in fahp.get("expert_names", [])],
+        )
+        precision_df = pd.DataFrame(
+            precision_matrix,
+            index=fahp.get("expert_names", []),
+            columns=data["criteria"],
+        )
+        precision_df.index.name = "Especialista"
         precision_df.to_excel(
             writer,
             sheet_name="Precisao_Atributos",
-            index=False,
         )
 
     out.seek(0)
@@ -1084,16 +1089,23 @@ if "result" in st.session_state:
         )
 
         st.subheader("Precisão dos atributos")
-        precision_df = pd.DataFrame({
-            "Critério": data["criteria"],
-            "Precisão": fahp.get("precision_levels", ["Alta"] * len(data["criteria"])),
-        })
-        st.dataframe(precision_df, use_container_width=True, hide_index=True)
+        precision_matrix = fahp.get(
+            "precision_levels",
+            [["Alta"] * len(data["criteria"]) for _ in fahp.get("expert_names", [])],
+        )
+        precision_df = pd.DataFrame(
+            precision_matrix,
+            index=fahp.get("expert_names", []),
+            columns=data["criteria"],
+        )
+        precision_df.index.name = "Especialista"
+        st.dataframe(precision_df, use_container_width=True)
         st.caption(
-            "A precisão aplica-se a atributos ordinais e contínuos. Alta = menor "
-            "incerteza, Média = representação padrão e Baixa = maior incerteza. "
-            "Para contínuos, a unidade original é preservada; para ordinais, "
-            "a representação linguística é contraída ou dilatada dentro dos limites da escala."
+            "A precisão é definida individualmente por especialista e critério. "
+            "Alta = menor incerteza, Média = intermediária e Baixa = maior "
+            "incerteza. Para contínuos, a unidade original é preservada; para "
+            "ordinais, a largura fuzzy é ajustada em unidades da escala, "
+            "respeitando seus limites."
         )
 
         st.plotly_chart(

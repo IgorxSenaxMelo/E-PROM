@@ -99,6 +99,24 @@ def run_e_prom_monte_carlo(
             f"({n_exp},{n_crit})."
         )
 
+    if precision_levels is None:
+        precision_matrix = [["Alta"] * n_crit for _ in range(n_exp)]
+    else:
+        arr = np.asarray(precision_levels, dtype=object)
+        if arr.ndim == 1:
+            if len(arr) != n_crit:
+                raise ValueError("Número de níveis de precisão incompatível.")
+            precision_matrix = [list(arr) for _ in range(n_exp)]
+        elif arr.ndim == 2:
+            if arr.shape != (n_exp, n_crit):
+                raise ValueError(
+                    "A matriz de precisão deve possuir dimensão "
+                    f"({n_exp}, {n_crit})."
+                )
+            precision_matrix = arr.tolist()
+        else:
+            raise ValueError("Formato de precisão inválido.")
+
     phi_mc = np.zeros((n_req, n_mc))
     phi_plus_mc = np.zeros((n_req, n_mc))
     phi_minus_mc = np.zeros((n_req, n_mc))
@@ -171,7 +189,7 @@ def run_e_prom_monte_carlo(
                 data_mc,
                 types,
                 scales,
-                precision_levels=precision_levels,
+                precision_levels=precision_matrix[e],
                 precision_support_pct=precision_support_pct,
                 precision_core_pct=precision_core_pct,
             )
@@ -281,4 +299,5 @@ def run_e_prom_monte_carlo(
         "n_mc": n_mc,
         "seed": seed,
         "continuous_variation_pct": variation,
+        "precision_levels": precision_matrix,
     }

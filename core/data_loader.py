@@ -116,7 +116,7 @@ def read_fahp_workbook(path, n_criteria=None):
 
     Formato simplificado para o usuário:
       linha 4: comparação relativa ao critério de referência;
-      linha 5: precisão do atributo (Alta, Média ou Baixa).
+      linha 5: precisão do atributo por especialista (Alta, Média ou Baixa).
 
     O primeiro critério é sempre o critério de referência e deve ser o mais
     importante. Portanto, sua comparação consigo mesmo é fixada em 1.
@@ -205,22 +205,12 @@ def read_fahp_workbook(path, n_criteria=None):
 
         precision_configs.append(normalized_precision)
         rows.append(numeric_row)
-
-    precision_levels = precision_configs[0]
-    for cfg in precision_configs[1:]:
-        if cfg != precision_levels:
-            raise ValueError(
-                "A configuração de precisão dos atributos deve ser igual em todas as abas do FAHP-Express."
-            )
-
-    # A precisão é uma propriedade geral do atributo e se aplica tanto a
-    # critérios ordinais quanto contínuos. A transformação fuzzy específica
-    # de cada tipo é realizada no núcleo do E-PROM.
+    # A precisão é individual: precision_levels[especialista][criterio].
 
     from .fahp import group_weights_from_reference_rows
     result = group_weights_from_reference_rows(rows)
     result["reference_rows"] = rows
-    result["precision_levels"] = precision_levels
+    result["precision_levels"] = precision_configs
     result["sheets"] = expert_sheets
     result["expert_names"] = expert_sheets
     return result

@@ -314,9 +314,22 @@ def run_e_prom(
         raise ValueError("Número de escalas incompatível.")
 
     if precision_levels is None:
-        precision_levels = ["Alta"] * n_crit
-    if len(precision_levels) != n_crit:
-        raise ValueError("Número de níveis de precisão incompatível.")
+        precision_matrix = [["Alta"] * n_crit for _ in range(n_exp)]
+    else:
+        arr = np.asarray(precision_levels, dtype=object)
+        if arr.ndim == 1:
+            if len(arr) != n_crit:
+                raise ValueError("Número de níveis de precisão incompatível.")
+            precision_matrix = [list(arr) for _ in range(n_exp)]
+        elif arr.ndim == 2:
+            if arr.shape != (n_exp, n_crit):
+                raise ValueError(
+                    "A matriz de precisão deve possuir dimensão "
+                    f"({n_exp}, {n_crit})."
+                )
+            precision_matrix = arr.tolist()
+        else:
+            raise ValueError("Formato de precisão inválido.")
 
     weights_fuzzy_individual = np.asarray(
         weights_fuzzy_individual,
@@ -373,7 +386,7 @@ def run_e_prom(
             data_e,
             types,
             scales,
-            precision_levels=precision_levels,
+            precision_levels=precision_matrix[e],
             precision_support_pct=precision_support_pct,
             precision_core_pct=precision_core_pct,
         )
@@ -479,7 +492,7 @@ def run_e_prom(
         "directions": np.asarray(directions, dtype=int),
         "preference_types": np.asarray(preference_types, dtype=int),
         "scales": np.asarray(scales, dtype=int),
-        "precision_levels": list(precision_levels),
+        "precision_levels": precision_matrix,
         "precision_support_pct": precision_support_pct,
         "precision_core_pct": precision_core_pct,
     }
