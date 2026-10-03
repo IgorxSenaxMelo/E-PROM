@@ -538,7 +538,8 @@ obter o ranking.
 
 ## 7. Monte Carlo / CPP
 
-O módulo de Monte Carlo avalia a estabilidade do resultado.
+O módulo de Monte Carlo avalia a estabilidade do resultado, preservando
+a informação fuzzy durante a agregação dos especialistas.
 
 ### Critérios ordinais
 
@@ -597,6 +598,9 @@ militar.
 ---
 
 ## 9. Interpretação
+
+Em cada simulação, os fluxos dos especialistas são agregados no domínio
+fuzzy e somente o fluxo fuzzy agregado é defuzzificado para obter o ranking.
 
 A análise probabilística deve ser usada como análise de estabilidade,
 não como substituição automática do ranking determinístico.
@@ -1035,6 +1039,11 @@ if "result" in st.session_state:
             "Para **critérios ordinais**, a incerteza é obtida empiricamente "
             "das respostas dos especialistas. Para **critérios contínuos**, "
             "informe a variação percentual ± desejada."
+        )
+        st.info(
+            "No E-PROM, os fluxos dos especialistas permanecem fuzzy durante "
+            "a agregação. A defuzzificação ocorre somente após a agregação "
+            "fuzzy, em cada simulação."
         )
 
         continuous_idx = [
