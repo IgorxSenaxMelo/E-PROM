@@ -2,7 +2,7 @@ streamlit
 pandas
 numpy
 openpyxl
+plotly
 scikit-learn
 matplotlib
-plotly
 reportlab

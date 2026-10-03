@@ -11,7 +11,10 @@ import plotly.graph_objects as go
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from core.data_loader import read_expert_workbook, read_fahp_workbook, CRITERIA
+from core.data_loader import (
+    read_expert_workbook,
+    read_fahp_workbook,
+)
 from core.e_prom_core import run_e_prom
 from core.fuzzy_numbers import defuzz_coa
 from core.cpp import cpp_normal
@@ -24,183 +27,167 @@ st.set_page_config(
 )
 
 
-# ---------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------
+PREF_CODES = {
+    "Usual": 1,
+    "U-shape": 2,
+    "V-shape": 3,
+    "Level": 4,
+    "Linear": 5,
+}
 
-def save_uploaded(uploaded_file):
-    """Save a Streamlit UploadedFile to a temporary file."""
-    suffix = Path(uploaded_file.name).suffix or ".xlsx"
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    tmp.write(uploaded_file.getvalue())
+
+def save_uploaded(f):
+    tmp = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=Path(f.name).suffix or ".xlsx",
+    )
+    tmp.write(f.getvalue())
     tmp.close()
     return Path(tmp.name)
 
 
-def get_expert_names(data):
-    """Accept both the current loader key ('sheets') and the newer key."""
-    return list(data.get("expert_names", data.get("sheets", [])))
-
-
-def get_criteria(data):
-    """Return criteria from the loader when available, otherwise the 5 E-PROM criteria."""
-    return list(data.get("criteria", CRITERIA))
-
-
-def normalize_result(result):
-    """
-    Accept result dictionaries produced by different E-PROM revisions.
-    The current expected names are rank_e_prom and *_experts.
-    """
-    r = dict(result)
-
-    if "rank_e_prom" not in r and "rank_siprem" in r:
-        r["rank_e_prom"] = r["rank_siprem"]
-
-    if "phi_net_experts" not in r and "phi_net_expert" in r:
-        r["phi_net_experts"] = r["phi_net_expert"]
-
-    if "phi_plus_experts" not in r and "phi_plus_expert" in r:
-        r["phi_plus_experts"] = r["phi_plus_expert"]
-
-    if "phi_minus_experts" not in r and "phi_minus_expert" in r:
-        r["phi_minus_experts"] = r["phi_minus_expert"]
-
-    if "expert_names" not in r:
-        r["expert_names"] = []
-
-    return r
-
-
 def result_df(data, result):
-    """Build the main E-PROM ranking table."""
-    result = normalize_result(result)
-
-    rank = np.asarray(result["rank_e_prom"], dtype=int)
-    phi_plus = np.asarray(result["phi_plus"], dtype=float)
-    phi_minus = np.asarray(result["phi_minus"], dtype=float)
-    phi_net = np.asarray(result["phi_net"], dtype=float)
-
-    df = pd.DataFrame(
-        {
-            "Rank": rank,
-            "Alternativa": data["ids"],
-            "Descricao": data["descriptions"],
-            "Phi+": phi_plus,
-            "Phi-": phi_minus,
-            "Phi líquido": phi_net,
-        }
-    )
-
-    return (
-        df.sort_values(["Rank", "Alternativa"])
-        .reset_index(drop=True)
-    )
+    return pd.DataFrame({
+        "Rank": np.asarray(
+            result["rank_e_prom"],
+            dtype=int,
+        ),
+        "Alternativa": data["ids"],
+        "Descricao": data["descriptions"],
+        "Phi+": result["phi_plus"],
+        "Phi-": result["phi_minus"],
+        "Phi líquido": result["phi_net"],
+    }).sort_values(
+        ["Rank", "Alternativa"]
+    ).reset_index(drop=True)
 
 
-def excel_bytes(data, result, config):
-    """
-    Export results to Excel.
-
-    Important:
-    sheet_name is passed explicitly to avoid the pandas/openpyxl
-    positional-argument error seen in the Streamlit deployment.
-    """
-    result = normalize_result(result)
+def excel_bytes(data, result, config, fahp):
     out = io.BytesIO()
-    ranking = result_df(data, result)
 
-    expert_names = get_expert_names(data)
-    if not expert_names:
-        expert_names = result.get("expert_names", [])
+    with pd.ExcelWriter(
+        out,
+        engine="openpyxl",
+    ) as writer:
 
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        ranking.to_excel(
+        result_df(
+            data,
+            result,
+        ).to_excel(
             writer,
             sheet_name="Ranking",
             index=False,
         )
 
-        phi_experts = np.asarray(
+        phi = pd.DataFrame(
             result["phi_net_experts"],
-            dtype=float,
-        )
-
-        phi_df = pd.DataFrame(
-            phi_experts,
             index=data["ids"],
-            columns=expert_names,
+            columns=result["expert_names"],
         )
-        phi_df.index.name = "Alternativa"
+        phi.index.name = "Alternativa"
 
-        phi_df.to_excel(
+        phi.to_excel(
             writer,
             sheet_name="Phi_por_Especialista",
         )
 
-        pd.DataFrame(config).to_excel(
+        config.to_excel(
             writer,
             sheet_name="Configuracao",
             index=False,
         )
 
-        # Also export fuzzy/group weights when available.
-        if "w_fuzzy_group" in st.session_state.get("fahp", {}):
-            wf = np.asarray(
-                st.session_state["fahp"]["w_fuzzy_group"],
-                dtype=float,
-            )
-            criteria = get_criteria(data)
+        fuzzy_w = pd.DataFrame(
+            fahp["w_fuzzy_group"],
+            index=data["criteria"],
+            columns=["a", "b", "c", "d"],
+        )
+        fuzzy_w.index.name = "Criterio"
 
-            weights_df = pd.DataFrame(
-                wf,
-                index=criteria,
-                columns=["a", "b", "c", "d"],
-            )
-            weights_df.index.name = "Criterio"
-
-            weights_df.to_excel(
-                writer,
-                sheet_name="Pesos_Fuzzy",
-            )
+        fuzzy_w.to_excel(
+            writer,
+            sheet_name="Pesos_Fuzzy",
+        )
 
     out.seek(0)
     return out.getvalue()
 
 
-def aggregate_weights(fahp):
-    """Defuzzify individual fuzzy criterion weights for visualization."""
+def plot_weights(fahp, criteria):
     wf = np.asarray(
         fahp["w_fuzzy_individual"],
         dtype=float,
     )
 
-    crisp = np.array(
+    crisp = np.array([
         [
-            [
-                defuzz_coa(wf[k, :, e])
-                for e in range(wf.shape[2])
-            ]
-            for k in range(wf.shape[0])
+            defuzz_coa(wf[k, :, e])
+            for e in range(wf.shape[2])
         ]
+        for k in range(wf.shape[0])
+    ])
+
+    mean = crisp.mean(axis=1)
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Bar(
+            x=criteria,
+            y=mean,
+            name="Peso médio",
+        )
     )
 
-    return crisp.mean(axis=1), crisp
+    for e, name in enumerate(
+        fahp.get(
+            "expert_names",
+            fahp.get(
+                "sheets",
+                [f"E{i + 1}" for i in range(crisp.shape[1])],
+            ),
+        )
+    ):
+        fig.add_trace(
+            go.Scatter(
+                x=criteria,
+                y=crisp[:, e],
+                mode="markers",
+                name=name,
+            )
+        )
+
+    fig.update_layout(
+        title="Pesos fuzzy — FAHP-Express",
+        xaxis_title="Critério",
+        yaxis_title="Peso",
+        height=500,
+    )
+
+    return fig
 
 
-def relation_matrix(result, ids):
-    """PROMETHEE I relation matrix: P, P-, I and R."""
-    result = normalize_result(result)
+def relation_matrix(result):
+    plus = np.asarray(
+        result["phi_plus"],
+        dtype=float,
+    )
+    minus = np.asarray(
+        result["phi_minus"],
+        dtype=float,
+    )
 
-    plus = np.asarray(result["phi_plus"], dtype=float)
-    minus = np.asarray(result["phi_minus"], dtype=float)
+    n = len(plus)
+    rel = np.empty(
+        (n, n),
+        dtype=object,
+    )
 
-    n = len(ids)
-    rel = np.empty((n, n), dtype=object)
     eps = 1e-10
 
     for i in range(n):
         for j in range(n):
+
             if i == j:
                 rel[i, j] = "I"
                 continue
@@ -209,10 +196,12 @@ def relation_matrix(result, ids):
                 plus[i] > plus[j] + eps
                 and minus[i] < minus[j] - eps
             )
+
             b = (
                 plus[i] < plus[j] - eps
                 and minus[i] > minus[j] + eps
             )
+
             eq = (
                 abs(plus[i] - plus[j]) <= eps
                 and abs(minus[i] - minus[j]) <= eps
@@ -230,101 +219,8 @@ def relation_matrix(result, ids):
     return rel
 
 
-def plot_weights(fahp, criteria):
-    """Plot FAHP-Express criterion weights."""
-    mean_w, crisp = aggregate_weights(fahp)
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Bar(
-            x=criteria,
-            y=mean_w,
-            name="Peso médio",
-        )
-    )
-
-    names = fahp.get(
-        "sheets",
-        [f"Especialista {i + 1}" for i in range(crisp.shape[1])],
-    )
-
-    for e, name in enumerate(names):
-        fig.add_trace(
-            go.Scatter(
-                x=criteria,
-                y=crisp[:, e],
-                mode="markers",
-                name=name,
-            )
-        )
-
-    fig.update_layout(
-        title="Pesos dos critérios — FAHP-Express",
-        xaxis_title="Critério",
-        yaxis_title="Peso",
-        height=500,
-    )
-
-    return fig
-
-
-def plot_rank_heatmap(data, result):
-    """Compare individual expert ranks with the E-PROM group rank."""
-    result = normalize_result(result)
-
-    labels = [str(x) for x in data["ids"]]
-    expert_names = result.get(
-        "expert_names",
-        get_expert_names(data),
-    )
-
-    ranks = np.asarray(
-        result["rank_experts"],
-        dtype=float,
-    )
-
-    df = pd.DataFrame(
-        ranks,
-        index=labels,
-        columns=expert_names,
-    )
-
-    df["E-PROM"] = np.asarray(
-        result["rank_e_prom"],
-        dtype=float,
-    )
-
-    df = df.sort_values("E-PROM")
-
-    fig = go.Figure(
-        go.Heatmap(
-            z=df.values,
-            x=list(df.columns),
-            y=list(df.index),
-            text=np.vectorize(
-                lambda x: f"{x:g}"
-            )(df.values),
-            texttemplate="%{text}",
-            colorscale="Blues_r",
-            zmin=1,
-            zmax=len(labels),
-            xgap=1,
-            ygap=1,
-            colorbar=dict(title="Posição"),
-        )
-    )
-
-    fig.update_layout(
-        title="Posições: especialistas vs E-PROM",
-        height=max(600, len(labels) * 25),
-    )
-
-    return fig
-
-
 def plot_relation(data, result):
-    """Plot PROMETHEE I relations."""
-    rel = relation_matrix(result, data["ids"])
+    rel = relation_matrix(result)
 
     mapping = {
         "P-": 0,
@@ -333,8 +229,14 @@ def plot_relation(data, result):
         "R": 3,
     }
 
-    z = np.vectorize(mapping.get)(rel)
-    labels = [str(x) for x in data["ids"]]
+    z = np.vectorize(
+        mapping.get
+    )(rel)
+
+    labels = [
+        str(x)
+        for x in data["ids"]
+    ]
 
     fig = go.Figure(
         go.Heatmap(
@@ -364,68 +266,115 @@ def plot_relation(data, result):
     )
 
     fig.update_layout(
-        title="PROMETHEE I — relações de preferência",
-        height=800,
+        title="PROMETHEE I — relações",
+        height=750,
     )
 
     return fig
 
 
-# ---------------------------------------------------------------------
-# UI
-# ---------------------------------------------------------------------
+def plot_rank_heatmap(data, result):
+    labels = [
+        str(x)
+        for x in data["ids"]
+    ]
+
+    df = pd.DataFrame(
+        result["rank_experts"],
+        index=labels,
+        columns=result["expert_names"],
+    )
+
+    df["E-PROM"] = result["rank_e_prom"]
+
+    df = df.sort_values(
+        "E-PROM"
+    )
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=df.values,
+            x=list(df.columns),
+            y=list(df.index),
+            text=np.vectorize(
+                lambda x: f"{x:g}"
+            )(df.values),
+            texttemplate="%{text}",
+            colorscale="Blues_r",
+            zmin=1,
+            zmax=len(labels),
+            xgap=1,
+            ygap=1,
+            colorbar=dict(
+                title="Posição"
+            ),
+        )
+    )
+
+    fig.update_layout(
+        title="Posições por especialista e E-PROM",
+        height=max(600, len(labels) * 30),
+    )
+
+    return fig
+
+
+# ================================================================
+# HEADER
+# ================================================================
 
 st.title("E-PROM")
 st.subheader(
     "Express Fuzzy Preference Ranking with PROMETHEE"
 )
 st.caption(
-    "FAHP-Express + Fuzzy PROMETHEE — versão generalizada, "
-    "sem classificação KEY."
+    "FAHP-Express + Fuzzy PROMETHEE — método generalizado."
 )
+
+
+# ================================================================
+# SIDEBAR
+# ================================================================
 
 with st.sidebar:
 
-    st.header("1. Dados")
+    st.header("1. Entradas")
 
     req_file = st.file_uploader(
         "Planilha das avaliações",
         type=["xlsx"],
-        help=(
-            "Planilha com as abas dos especialistas. "
-            "A última aba deve ser a aba de apoio/instruções."
-        ),
     )
 
     fahp_file = st.file_uploader(
         "Planilha FAHP-Express",
         type=["xlsx"],
-        help=(
-            "Planilha com os julgamentos/referências do FAHP-Express."
-        ),
     )
+
+    run = False
 
     if req_file is not None:
 
-        tmp_req = save_uploaded(req_file)
-
         try:
-            preview = read_expert_workbook(tmp_req)
 
-            criteria = get_criteria(preview)
+            preview = read_expert_workbook(
+                save_uploaded(req_file)
+            )
+
+            criteria = preview["criteria"]
             ncrit = len(criteria)
 
             st.success(
-                f"{ncrit} critérios detectados."
+                f"{preview['n_experts']} especialistas · "
+                f"{preview['n_requirements']} alternativas · "
+                f"{ncrit} critérios"
             )
 
             st.divider()
             st.header("2. Configuração dos critérios")
 
             st.info(
-                "Para cada critério, escolha o tipo de dado, "
-                "a direção, a função de preferência e, quando "
-                "aplicável, os limiares q e p."
+                "Ordinal: Usual ou Level. "
+                "Contínuo: U-shape, V-shape ou Linear."
             )
 
             dirs = []
@@ -436,7 +385,9 @@ with st.sidebar:
             scales = []
             rows = []
 
-            for k, criterion in enumerate(criteria):
+            for k, criterion in enumerate(
+                criteria
+            ):
 
                 st.markdown(
                     f"### {criterion}"
@@ -445,31 +396,22 @@ with st.sidebar:
                 typ = st.selectbox(
                     "Tipo de dado",
                     ["Ordinal", "Contínuo"],
-                    key=f"typ_{k}",
-                    help=(
-                        "Ordinal: escalas discretas, como Likert. "
-                        "Contínuo: custo, tempo, medida física etc."
-                    ),
+                    key=f"type_{k}",
                 )
 
-                direction = st.selectbox(
+                direction_name = st.selectbox(
                     "Direção",
                     ["Maximizar", "Minimizar"],
-                    key=f"dir_{k}",
+                    key=f"direction_{k}",
                 )
 
                 if typ == "Ordinal":
 
                     scale = st.selectbox(
-                        "Escala",
-                        ["5", "7", "9"],
+                        "Escala ordinal",
+                        [5, 7, 9],
                         index=1,
                         key=f"scale_{k}",
-                        help=(
-                            "Escolha a escala utilizada para "
-                            "representar a avaliação ordinal como "
-                            "número fuzzy trapezoidal."
-                        ),
                     )
 
                     pref_name = st.selectbox(
@@ -478,7 +420,10 @@ with st.sidebar:
                         key=f"pref_{k}",
                     )
 
-                    if pref_name == "Level":
+                    if pref_name == "Usual":
+                        q = 0.0
+                        p = 0.0
+                    else:
 
                         q = st.number_input(
                             "q — indiferença",
@@ -486,89 +431,107 @@ with st.sidebar:
                             value=0.0,
                             step=1.0,
                             key=f"q_{k}",
-                            help=(
-                                "Diferença até q: região de indiferença."
-                            ),
                         )
 
                         p = st.number_input(
                             "p — preferência",
                             min_value=float(q + 1e-9),
-                            value=max(float(q + 1), 1.0),
+                            value=float(q + 1),
                             step=1.0,
                             key=f"p_{k}",
-                            help=(
-                                "A partir de p: preferência completa."
-                            ),
                         )
-
-                    else:
-                        q = 0.0
-                        p = 0.0
 
                 else:
 
-                    scale = 1
+                    scale = 0
 
                     pref_name = st.selectbox(
                         "Função de preferência",
-                        ["Level", "Linear"],
+                        [
+                            "U-shape",
+                            "V-shape",
+                            "Linear",
+                        ],
                         key=f"pref_{k}",
-                        help=(
-                            "Para dados contínuos, o E-PROM "
-                            "utiliza funções com limiares q e p."
-                        ),
                     )
 
-                    q = st.number_input(
-                        "q — limiar de indiferença",
-                        min_value=0.0,
-                        value=0.0,
-                        step=0.1,
-                        key=f"q_{k}",
-                        help=(
-                            "Informe q na unidade original do critério."
-                        ),
-                    )
+                    if pref_name == "U-shape":
 
-                    p = st.number_input(
-                        "p — limiar de preferência",
-                        min_value=float(q + 1e-9),
-                        value=max(float(q + 1), 1.0),
-                        step=0.1,
-                        key=f"p_{k}",
-                        help=(
-                            "Informe p na unidade original do critério. "
-                            "Deve ser maior que q."
-                        ),
-                    )
+                        q = st.number_input(
+                            "q — limiar de indiferença",
+                            min_value=0.0,
+                            value=0.0,
+                            step=1.0,
+                            key=f"q_{k}",
+                            help=(
+                                "Diferença até q: indiferença. "
+                                "Use a unidade original do critério."
+                            ),
+                        )
 
-                pref_code = {
-                    "Usual": 1,
-                    "Level": 4,
-                    "Linear": 5,
-                }[pref_name]
+                        p = 0.0
+
+                    elif pref_name == "V-shape":
+
+                        q = 0.0
+
+                        p = st.number_input(
+                            "p — limiar de preferência",
+                            min_value=1e-9,
+                            value=1.0,
+                            step=1.0,
+                            key=f"p_{k}",
+                            help=(
+                                "Até p, a preferência cresce linearmente; "
+                                "a partir de p, é completa."
+                            ),
+                        )
+
+                    else:  # Linear
+
+                        q = st.number_input(
+                            "q — limiar de indiferença",
+                            min_value=0.0,
+                            value=0.0,
+                            step=1.0,
+                            key=f"q_{k}",
+                        )
+
+                        p = st.number_input(
+                            "p — limiar de preferência",
+                            min_value=float(q + 1e-9),
+                            value=float(q + 1),
+                            step=1.0,
+                            key=f"p_{k}",
+                        )
+
+                code = PREF_CODES[pref_name]
 
                 dirs.append(
-                    1 if direction == "Maximizar" else -1
+                    1
+                    if direction_name == "Maximizar"
+                    else -1
                 )
+
                 types.append(typ)
-                prefs.append(pref_code)
+                prefs.append(code)
                 qs.append(q)
                 ps.append(p)
-                scales.append(int(scale))
+                scales.append(scale)
 
-                rows.append(
-                    {
-                        "Criterio": criterion,
-                        "Tipo": typ,
-                        "Direção": direction,
-                        "Função": pref_name,
-                        "q": q,
-                        "p": p,
-                        "Escala": scale,
-                    }
-                )
+                rows.append({
+                    "Criterio": criterion,
+                    "Tipo": typ,
+                    "Direção": direction_name,
+                    "Função": pref_name,
+                    "q": q,
+                    "p": p,
+                    "Escala": (
+                        scale
+                        if typ == "Ordinal"
+                        else "Contínua"
+                    ),
+                })
 
             config = pd.DataFrame(rows)
 
@@ -582,18 +545,15 @@ with st.sidebar:
             )
 
         except Exception as exc:
+
             st.error(
-                f"Erro ao ler a planilha de avaliações: {exc}"
+                f"Erro ao ler a planilha: {exc}"
             )
-            run = False
-
-    else:
-        run = False
 
 
-# ---------------------------------------------------------------------
-# Main execution
-# ---------------------------------------------------------------------
+# ================================================================
+# EXECUTION
+# ================================================================
 
 if run:
 
@@ -612,7 +572,10 @@ if run:
             data = preview
 
             fahp = read_fahp_workbook(
-                save_uploaded(fahp_file)
+                save_uploaded(fahp_file),
+                n_criteria=len(
+                    data["criteria"]
+                ),
             )
 
             result = run_e_prom(
@@ -626,21 +589,16 @@ if run:
                 scales,
             )
 
-            result = normalize_result(result)
-
             ranking = result_df(
                 data,
                 result,
             )
 
-            # Store FAHP before generating Excel because the export
-            # optionally includes the group fuzzy weights.
-            st.session_state["fahp"] = fahp
-
             xlsx = excel_bytes(
                 data,
                 result,
                 config,
+                fahp,
             )
 
         st.session_state.update(
@@ -657,22 +615,19 @@ if run:
         )
 
     except Exception as exc:
-
         st.exception(exc)
         st.stop()
 
 
-# ---------------------------------------------------------------------
-# Results
-# ---------------------------------------------------------------------
+# ================================================================
+# RESULTS
+# ================================================================
 
 if "result" in st.session_state:
 
     data = st.session_state["data"]
     fahp = st.session_state["fahp"]
-    result = normalize_result(
-        st.session_state["result"]
-    )
+    result = st.session_state["result"]
     config = st.session_state["config"]
     ranking = st.session_state["ranking"]
 
@@ -685,22 +640,17 @@ if "result" in st.session_state:
         data["n_experts"],
     )
 
-    a2 = data.get(
-        "n_requirements",
-        len(data["ids"]),
-    )
-
     b.metric(
         "Alternativas",
-        a2,
+        data["n_requirements"],
     )
 
     c.metric(
         "Critérios",
-        len(get_criteria(data)),
+        data["n_criteria"],
     )
 
-    t1, t2, t3, t4 = st.tabs(
+    tab1, tab2, tab3, tab4 = st.tabs(
         [
             "🏆 Ranking",
             "📈 PROMETHEE",
@@ -709,11 +659,7 @@ if "result" in st.session_state:
         ]
     )
 
-    # ---------------------------------------------------------------
-    # Ranking
-    # ---------------------------------------------------------------
-
-    with t1:
+    with tab1:
 
         st.dataframe(
             ranking,
@@ -731,16 +677,12 @@ if "result" in st.session_state:
             ),
         )
 
-    # ---------------------------------------------------------------
-    # PROMETHEE
-    # ---------------------------------------------------------------
-
-    with t2:
+    with tab2:
 
         st.plotly_chart(
             plot_weights(
                 fahp,
-                get_criteria(data),
+                data["criteria"],
             ),
             use_container_width=True,
         )
@@ -753,47 +695,35 @@ if "result" in st.session_state:
             use_container_width=True,
         )
 
-        if "rank_experts" in result:
-            st.plotly_chart(
-                plot_rank_heatmap(
-                    data,
-                    result,
-                ),
-                use_container_width=True,
-            )
-
-    # ---------------------------------------------------------------
-    # Experts
-    # ---------------------------------------------------------------
-
-    with t3:
-
-        expert_names = result.get(
-            "expert_names",
-            get_expert_names(data),
+        st.plotly_chart(
+            plot_rank_heatmap(
+                data,
+                result,
+            ),
+            use_container_width=True,
         )
 
-        if "phi_net_experts" in result:
+    with tab3:
 
-            phi_df = pd.DataFrame(
-                result["phi_net_experts"],
-                index=data["ids"],
-                columns=expert_names,
-            )
+        phi_df = pd.DataFrame(
+            result["phi_net_experts"],
+            index=data["ids"],
+            columns=result["expert_names"],
+        )
 
-            phi_df.index.name = "Alternativa"
-
-            st.subheader(
-                "Phi líquido por especialista"
-            )
-
-            st.dataframe(
-                phi_df,
-                use_container_width=True,
-            )
+        phi_df.index.name = "Alternativa"
 
         st.subheader(
-            "Configuração dos critérios"
+            "Phi líquido por especialista"
+        )
+
+        st.dataframe(
+            phi_df,
+            use_container_width=True,
+        )
+
+        st.subheader(
+            "Configuração"
         )
 
         st.dataframe(
@@ -802,25 +732,22 @@ if "result" in st.session_state:
             hide_index=True,
         )
 
-    # ---------------------------------------------------------------
-    # CPP
-    # ---------------------------------------------------------------
-
-    with t4:
+    with tab4:
 
         st.info(
-            "CPP — Composition of Probabilistic Preferences. "
-            "Este módulo é aplicado aos critérios configurados "
-            "como Contínuos."
+            "CPP é um módulo separado para critérios contínuos. "
+            "Informe os desvios-padrão por alternativa e critério."
         )
 
-        cont_idx = [
+        continuous_idx = [
             i
-            for i, value in enumerate(config["Tipo"])
-            if value == "Contínuo"
+            for i, typ in enumerate(
+                config["Tipo"]
+            )
+            if typ == "Contínuo"
         ]
 
-        if not cont_idx:
+        if not continuous_idx:
 
             st.warning(
                 "Nenhum critério contínuo foi configurado."
@@ -828,25 +755,21 @@ if "result" in st.session_state:
 
         else:
 
-            cont_criteria = [
-                get_criteria(data)[i]
-                for i in cont_idx
+            continuous_criteria = [
+                data["criteria"][i]
+                for i in continuous_idx
             ]
 
             std_df = pd.DataFrame(
                 0.0,
                 index=data["ids"],
-                columns=cont_criteria,
+                columns=continuous_criteria,
             )
 
-            edited = st.data_editor(
+            std_input = st.data_editor(
                 std_df,
                 use_container_width=True,
                 key="cpp_std",
-                help=(
-                    "Informe o desvio-padrão de cada alternativa "
-                    "para cada critério contínuo."
-                ),
             )
 
             nsim = st.number_input(
@@ -869,89 +792,60 @@ if "result" in st.session_state:
                 type="primary",
             ):
 
-                expert_names = get_expert_names(data)
+                expert_values = np.stack(
+                    [
+                        data["evaluations"][name]
+                        for name in data["expert_names"]
+                    ],
+                    axis=0,
+                )
 
-                if not expert_names:
-                    expert_names = result.get(
-                        "expert_names",
-                        [],
+                X_all = np.mean(
+                    expert_values,
+                    axis=0,
+                )
+
+                X = X_all[
+                    :,
+                    continuous_idx,
+                ]
+
+                S = std_input.to_numpy(
+                    dtype=float
+                )
+
+                W = np.array([
+                    defuzz_coa(
+                        fahp["w_fuzzy_group"][i]
                     )
-
-                # Mean decision matrix across experts.
-                stacked = np.stack(
-                    [
-                        np.asarray(
-                            data["evaluations"][expert],
-                            dtype=float,
-                        )
-                        for expert in expert_names
-                    ],
-                    axis=0,
-                )
-
-                vals = np.mean(
-                    stacked,
-                    axis=0,
-                )
-
-                X = vals[:, cont_idx]
-                S = edited.to_numpy(dtype=float)
-
-                # Group fuzzy weights for CPP.
-                W = np.array(
-                    [
-                        defuzz_coa(
-                            fahp["w_fuzzy_group"][i]
-                        )
-                        for i in cont_idx
-                    ],
-                    dtype=float,
-                )
-
-                W_sum = W.sum()
-                if W_sum > 0:
-                    W = W / W_sum
+                    for i in continuous_idx
+                ])
 
                 cpp = cpp_normal(
                     X,
                     S,
-                    np.array(dirs)[cont_idx],
-                    int(nsim),
-                    int(seed),
+                    np.asarray(
+                        dirs
+                    )[continuous_idx],
+                    nsim=int(nsim),
+                    seed=int(seed),
                     weights=W,
                 )
 
-                cpp_df = pd.DataFrame(
-                    {
-                        "Alternativa": data["ids"],
-                        "Score_CPP": cpp["score"],
-                        "Rank_CPP": cpp["rank"],
-                    }
-                ).sort_values(
-                    "Rank_CPP"
+                cpp_df = pd.DataFrame({
+                    "Alternativa": data["ids"],
+                    "Prob. melhor": cpp["score"],
+                    "Rank CPP": cpp["rank"],
+                }).sort_values(
+                    "Rank CPP"
                 )
 
                 st.subheader(
-                    "Ranking probabilístico — CPP"
+                    "Resultado CPP"
                 )
 
                 st.dataframe(
                     cpp_df,
                     use_container_width=True,
                     hide_index=True,
-                )
-
-                st.subheader(
-                    "Probabilidade de ser a melhor"
-                )
-
-                prob_df = pd.DataFrame(
-                    cpp["prob_best"],
-                    index=data["ids"],
-                    columns=cont_criteria,
-                )
-
-                st.dataframe(
-                    prob_df,
-                    use_container_width=True,
                 )
