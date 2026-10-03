@@ -110,6 +110,16 @@ def excel_bytes(data, result, config, fahp):
             sheet_name="Pesos_Fuzzy",
         )
 
+        precision_df = pd.DataFrame({
+            "Criterio": data["criteria"],
+            "Precisão": fahp.get("precision_levels", ["Alta"] * len(data["criteria"])),
+        })
+        precision_df.to_excel(
+            writer,
+            sheet_name="Precisao_Atributos",
+            index=False,
+        )
+
     out.seek(0)
     return out.getvalue()
 
@@ -513,6 +523,33 @@ Funções permitidas:
 
 O valor permanece na unidade original. Não é convertido para 1–7.
 
+### Representação fuzzy dos atributos contínuos
+
+Na versão atual, cada valor contínuo observado x é representado por um
+número fuzzy trapezoidal cuja largura depende da **precisão do atributo**.
+A configuração é informada na planilha FAHP-Express.
+
+A transformação utilizada é:
+
+`x~ = [x(1-rs), x(1-rc), x(1+rc), x(1+rs)]`
+
+onde `rs` é a amplitude relativa do suporte externo e `rc` a amplitude
+relativa do núcleo, com `0 <= rc <= rs`. Assim, maior precisão implica
+menor dispersão fuzzy.
+
+Parâmetros padrão:
+
+- **Alta:** suporte ±5%; núcleo ±2%;
+- **Média:** suporte ±10%; núcleo ±4%;
+- **Baixa:** suporte ±16,6667%; núcleo ±6,6667%.
+
+Por exemplo, para `x = 300000` e precisão **Baixa**:
+
+`x~ ≈ [250000, 280000, 320000, 350000]`
+
+Os percentuais são parâmetros operacionais do modelo e podem ser ajustados
+no arquivo FAHP-Express conforme a justificativa do estudo.
+
 ---
 
 ## 4. Limiar q e p
@@ -788,6 +825,11 @@ with st.sidebar:
                 else:
 
                     scale = 0
+                    st.caption(
+                        "Na versão atual, o valor contínuo é tratado como "
+                        "fuzzy degenerado [x, x, x, x]. A incerteza adicional "
+                        "é tratada pelos limiares q/p e pelo CPP/Monte Carlo."
+                    )
 
                     pref_name = st.selectbox(
                         "Função de preferência",
@@ -931,6 +973,7 @@ if run:
                 qs,
                 ps,
                 scales,
+                precision_levels=fahp.get("precision_levels"),
             )
 
             ranking = result_df(
@@ -1023,6 +1066,34 @@ if "result" in st.session_state:
         )
 
     with tab2:
+
+        st.subheader("Pesos fuzzy dos critérios")
+        st.caption(
+            "Pesos obtidos pelo FAHP-Express. Os números fuzzy são mantidos "
+            "durante o Fuzzy PROMETHEE e não são defuzzificados nesta etapa."
+        )
+        fuzzy_weights_df = pd.DataFrame(
+            np.asarray(fahp["w_fuzzy_group"], dtype=float),
+            index=data["criteria"],
+            columns=["a", "b", "c", "d"],
+        )
+        fuzzy_weights_df.index.name = "Critério"
+        st.dataframe(
+            fuzzy_weights_df.style.format("{:.6f}"),
+            use_container_width=True,
+        )
+
+        st.subheader("Precisão dos atributos contínuos")
+        precision_df = pd.DataFrame({
+            "Critério": data["criteria"],
+            "Precisão": fahp.get("precision_levels", ["Alta"] * len(data["criteria"])),
+        })
+        st.dataframe(precision_df, use_container_width=True, hide_index=True)
+        st.caption(
+            "Para critérios contínuos, o valor x é representado por um trapezoide "
+            "fuzzy [x(1-rs), x(1-rc), x(1+rc), x(1+rs)]. Maior precisão implica "
+            "menor dispersão. Critérios ordinais continuam usando a escala linguística."
+        )
 
         st.plotly_chart(
             plot_weights(
@@ -1186,6 +1257,7 @@ if "result" in st.session_state:
                 variation,
                 n_mc=int(n_mc),
                 seed=int(seed),
+                precision_levels=fahp.get("precision_levels"),
             )
 
             st.session_state["mc"] = mc

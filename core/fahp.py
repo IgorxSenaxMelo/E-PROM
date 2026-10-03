@@ -39,7 +39,13 @@ def saaty_linguistic2num(x):
             raise ValueError("Valor NaN/inf na escala Saaty.")
         return value
 
-    s = str(x).strip().lower()
+    s = str(x).strip().lower().replace(",", ".")
+    try:
+        value = float(s)
+        if np.isfinite(value):
+            return value
+    except ValueError:
+        pass
     if s not in SAATY_MAP:
         raise ValueError(f"Escala Saaty não reconhecida: {x!r}")
     return float(SAATY_MAP[s])
@@ -112,6 +118,12 @@ def calc_fahp_buckley(m_fuzzy):
 
 
 def weights_from_reference_row(reference_values):
+    """Reconstrói a matriz AHP a partir da linha de referência do E-PROM.
+
+    O primeiro elemento é a âncora e deve ser 1. Os demais valores representam
+    quantas vezes a referência é mais importante que cada critério. Assim,
+    A_ij = v_j / v_i, produzindo A_1j = v_j e A_j1 = 1/v_j.
+    """
     vals = np.array(
         [saaty_linguistic2num(x) for x in reference_values],
         dtype=float,

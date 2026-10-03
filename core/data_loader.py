@@ -112,10 +112,20 @@ def read_expert_workbook(path):
 
 
 def read_fahp_workbook(path, n_criteria=None):
-    """Lê B4 em diante de cada aba de especialista.
+    """Lê a planilha FAHP-Express.
 
-    Cada aba deve conter, na linha 4, os valores de referência do FAHP-Express
-    a partir de B4. A última aba é considerada apoio/instruções.
+    Formato simplificado para o usuário:
+      linha 4: comparação relativa ao critério de referência;
+      linha 5: precisão do atributo (Alta, Média, Baixa ou Não aplicável).
+
+    O primeiro critério é sempre o critério de referência e deve ser o mais
+    importante. Portanto, sua comparação consigo mesmo é fixada em 1.
+    Os demais valores são fatores positivos na escala de razão, indicando
+    quantas vezes o critério de referência é mais importante que o critério.
+
+    Os parâmetros do trapezoide fuzzy dos atributos contínuos são padronizados
+    internamente pelo E-PROM conforme o nível de precisão; o usuário não
+    precisa informar suporte e núcleo separadamente.
     """
     path = Path(path)
     xls = pd.ExcelFile(path)
@@ -129,6 +139,7 @@ def read_fahp_workbook(path, n_criteria=None):
 
     expert_sheets = sheets[:-1]
     rows = []
+    precision_configs = []
 
     for sheet in expert_sheets:
         df = pd.read_excel(path, sheet_name=sheet, header=None)
@@ -137,8 +148,8 @@ def read_fahp_workbook(path, n_criteria=None):
             raise ValueError(f"Aba FAHP {sheet!r} não possui a linha 4.")
 
         available = df.iloc[3, 1:].tolist()
+        precision = df.iloc[4, 1:].tolist() if df.shape[0] >= 5 else []
 
-        # Remove células vazias somente no final.
         while available and (
             available[-1] is None
             or (isinstance(available[-1], float) and np.isnan(available[-1]))
@@ -148,21 +159,71 @@ def read_fahp_workbook(path, n_criteria=None):
         if n_criteria is not None:
             if len(available) < n_criteria:
                 raise ValueError(
-                    f"Aba FAHP {sheet!r}: esperados {n_criteria} valores em B4 em diante."
+                    f"Aba FAHP {sheet!r}: esperados {n_criteria} valores na linha de referência."
                 )
             available = available[:n_criteria]
 
         from .fahp import saaty_linguistic2num
-        numeric_row = [
-            saaty_linguistic2num(x)
-            for x in available
-        ]
+        numeric_row = [saaty_linguistic2num(x) for x in available]
+
+        if len(numeric_row) < 2:
+            raise ValueError("O FAHP-Express requer pelo menos 2 critérios.")
+
+        # O primeiro critério é a âncora do FAHP-Express.
+        if not np.isclose(numeric_row[0], 1.0, atol=1e-9):
+            raise ValueError(
+                f"Aba FAHP {sheet!r}: o primeiro critério é a referência e "
+                "deve possuir valor 1."
+            )
+
+        # Como o primeiro critério é definido como o mais importante, os
+        # fatores dos demais critérios devem ser >= 1: 1 = referência; 3 =
+        # referência três vezes mais importante que o critério em questão.
+        if any(x < 1.0 - 1e-9 for x in numeric_row):
+            raise ValueError(
+                f"Aba FAHP {sheet!r}: como o primeiro critério é a referência "
+                "mais importante, os demais fatores devem ser >= 1."
+            )
+
+        if len(precision) < len(numeric_row):
+            precision = ["Alta"] * len(numeric_row)
+        else:
+            precision = precision[:len(numeric_row)]
+
+        allowed = {"Alta", "Média", "Baixa", "Não aplicável", "Nao aplicavel"}
+        normalized_precision = []
+        for k, value in enumerate(precision):
+            if value is None or (isinstance(value, float) and np.isnan(value)):
+                value = "Alta"
+            value = str(value).strip()
+            if value == "Nao aplicavel":
+                value = "Não aplicável"
+            if value not in allowed:
+                raise ValueError(
+                    f"Aba FAHP {sheet!r}, critério {k+1}: precisão inválida {value!r}. "
+                    "Use Alta, Média, Baixa ou Não aplicável."
+                )
+            normalized_precision.append(value)
+
+        precision_configs.append(normalized_precision)
         rows.append(numeric_row)
 
-    from .fahp import group_weights_from_reference_rows
+    precision_levels = precision_configs[0]
+    for cfg in precision_configs[1:]:
+        if cfg != precision_levels:
+            raise ValueError(
+                "A configuração de precisão dos atributos deve ser igual em todas as abas do FAHP-Express."
+            )
 
+    # Para critérios contínuos, a precisão deve ser Alta/Média/Baixa. Para
+    # critérios ordinais, use Não aplicável. Como a planilha FAHP não conhece
+    # automaticamente o tipo escolhido na interface, a validação estrita é
+    # feita posteriormente no app/core quando os tipos dos critérios estão disponíveis.
+
+    from .fahp import group_weights_from_reference_rows
     result = group_weights_from_reference_rows(rows)
     result["reference_rows"] = rows
+    result["precision_levels"] = precision_levels
     result["sheets"] = expert_sheets
     result["expert_names"] = expert_sheets
     return result

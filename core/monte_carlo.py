@@ -59,6 +59,9 @@ def run_e_prom_monte_carlo(
     continuous_variation_pct,
     n_mc=1000,
     seed=42,
+    precision_levels=None,
+    precision_support_pct=None,
+    precision_core_pct=None,
 ):
     """
     Retorna uma análise de estabilidade do E-PROM.
@@ -168,6 +171,9 @@ def run_e_prom_monte_carlo(
                 data_mc,
                 types,
                 scales,
+                precision_levels=precision_levels,
+                precision_support_pct=precision_support_pct,
+                precision_core_pct=precision_core_pct,
             )
 
             # Para manter a lógica de grupo do MC-SIPREM, o mesmo vetor

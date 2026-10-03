@@ -71,16 +71,72 @@ def fuzzify_ordinal(value, scale_max):
     )
 
 
+PRECISION_DEFAULTS = {
+    # (suporte externo %, núcleo %, relativos ao valor observado)
+    # A escala é deliberadamente monotônica: maior precisão -> menor
+    # dispersão fuzzy. Os valores são parâmetros operacionais padrão e
+    # podem ser sobrescritos no arquivo FAHP-Express.
+    "Alta": (5.0, 2.0),
+    "Média": (10.0, 4.0),
+    "Baixa": (16.6667, 6.6667),
+}
+
+
+def continuous_to_fuzzy(value, precision="Alta", support_pct=None, core_pct=None):
+    """Converte um valor contínuo em trapezoide fuzzy relativo.
+
+    x -> [x(1-r_s), x(1-r_c), x(1+r_c), x(1+r_s)]
+
+    r_s = semi-amplitude externa (suporte)
+    r_c = semi-amplitude interna (núcleo)
+
+    A parametrização usa a unidade original do atributo e representa
+    incerteza epistemológica sobre o valor observado.
+    """
+    x = float(value)
+    if not np.isfinite(x):
+        raise ValueError("Valor contínuo inválido.")
+
+    if support_pct is None or core_pct is None:
+        if precision not in PRECISION_DEFAULTS:
+            raise ValueError(
+                f"Precisão não reconhecida: {precision!r}. Use Alta, Média ou Baixa."
+            )
+        support_pct, core_pct = PRECISION_DEFAULTS[precision]
+
+    rs = abs(float(support_pct)) / 100.0
+    rc = abs(float(core_pct)) / 100.0
+
+    if rc > rs:
+        raise ValueError("A amplitude do núcleo não pode ser maior que a do suporte.")
+
+    scale = abs(x)
+    if scale == 0:
+        return np.zeros(4, dtype=float)
+
+    a = x - scale * rs
+    b = x - scale * rc
+    c = x + scale * rc
+    d = x + scale * rs
+    return np.sort(np.array([a, b, c, d], dtype=float))
+
+
 def build_fuzzy_matrix(
     data_numeric,
     types,
     scales,
+    precision_levels=None,
+    precision_support_pct=None,
+    precision_core_pct=None,
 ):
     """
     Ordinal -> trapezoide linguístico.
-    Contínuo -> número fuzzy degenerado [x,x,x,x].
+    Contínuo -> trapezoide fuzzy parametrizado pela precisão.
 
-    Assim, valores contínuos permanecem na unidade original.
+    A forma geral para um valor contínuo x é:
+        [x(1-r_s), x(1-r_c), x(1+r_c), x(1+r_s)]
+
+    mantendo o atributo na unidade original.
     """
     data_numeric = np.asarray(
         data_numeric,
@@ -98,6 +154,16 @@ def build_fuzzy_matrix(
         (n_req, n_crit, 4),
         dtype=float,
     )
+
+    if precision_levels is None:
+        precision_levels = ["Alta"] * n_crit
+    if len(precision_levels) != n_crit:
+        raise ValueError("Número de níveis de precisão incompatível.")
+
+    if precision_support_pct is None:
+        precision_support_pct = [None] * n_crit
+    if precision_core_pct is None:
+        precision_core_pct = [None] * n_crit
 
     for i in range(n_req):
 
@@ -118,9 +184,11 @@ def build_fuzzy_matrix(
                         f"critério {k + 1}."
                     )
 
-                F[i, k] = np.array(
-                    [value, value, value, value],
-                    dtype=float,
+                F[i, k] = continuous_to_fuzzy(
+                    value,
+                    precision=str(precision_levels[k]),
+                    support_pct=precision_support_pct[k],
+                    core_pct=precision_core_pct[k],
                 )
 
             else:
@@ -197,6 +265,9 @@ def run_e_prom(
     q_vals,
     p_vals,
     scales,
+    precision_levels=None,
+    precision_support_pct=None,
+    precision_core_pct=None,
 ):
     """
     Executa o E-PROM individualmente para cada especialista e
@@ -235,6 +306,11 @@ def run_e_prom(
 
     if len(scales) != n_crit:
         raise ValueError("Número de escalas incompatível.")
+
+    if precision_levels is None:
+        precision_levels = ["Alta"] * n_crit
+    if len(precision_levels) != n_crit:
+        raise ValueError("Número de níveis de precisão incompatível.")
 
     weights_fuzzy_individual = np.asarray(
         weights_fuzzy_individual,
@@ -291,6 +367,9 @@ def run_e_prom(
             data_e,
             types,
             scales,
+            precision_levels=precision_levels,
+            precision_support_pct=precision_support_pct,
+            precision_core_pct=precision_core_pct,
         )
 
         w_e = weights_fuzzy_individual[
@@ -394,4 +473,7 @@ def run_e_prom(
         "directions": np.asarray(directions, dtype=int),
         "preference_types": np.asarray(preference_types, dtype=int),
         "scales": np.asarray(scales, dtype=int),
+        "precision_levels": list(precision_levels),
+        "precision_support_pct": precision_support_pct,
+        "precision_core_pct": precision_core_pct,
     }
