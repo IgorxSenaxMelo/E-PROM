@@ -86,6 +86,7 @@ def run_fuzzy_promethee_trap(
     pref_types,
     q_vals,
     p_vals,
+    defuzzify=True,
 ):
     """
     F: [alternative, criterion, 4] fuzzy evaluations.
@@ -206,9 +207,10 @@ def run_fuzzy_promethee_trap(
         phi_minus_fuzzy[i] = avg_m
         phi_net_fuzzy[i] = net_f
 
-        phi_plus[i] = defuzz_coa(avg_p)
-        phi_minus[i] = defuzz_coa(avg_m)
-        phi_net[i] = defuzz_coa(net_f)
+        if defuzzify:
+            phi_plus[i] = defuzz_coa(avg_p)
+            phi_minus[i] = defuzz_coa(avg_m)
+            phi_net[i] = defuzz_coa(net_f)
 
     return (
         phi_plus,

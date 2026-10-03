@@ -113,9 +113,10 @@ def run_e_prom_monte_carlo(
         )
         W_samples[mc] = w_crisp_mc
 
-        phi_plus_exp = np.zeros((n_req, n_exp))
-        phi_minus_exp = np.zeros((n_req, n_exp))
-        phi_net_exp = np.zeros((n_req, n_exp))
+        # Os fluxos são mantidos fuzzy durante toda a agregação.
+        phi_plus_fuzzy_exp = np.zeros((n_req, 4, n_exp))
+        phi_minus_fuzzy_exp = np.zeros((n_req, 4, n_exp))
+        phi_net_fuzzy_exp = np.zeros((n_req, 4, n_exp))
 
         # 2) Atributos por especialista.
         for e, expert in enumerate(experts):
@@ -178,25 +179,37 @@ def run_e_prom_monte_carlo(
                 preference_types,
                 q_vals,
                 p_vals,
+                defuzzify=False,
             )
 
             (
-                pp,
-                pm,
-                pn,
                 _,
                 _,
                 _,
+                pp_f,
+                pm_f,
+                pn_f,
             ) = output
 
-            phi_plus_exp[:, e] = pp
-            phi_minus_exp[:, e] = pm
-            phi_net_exp[:, e] = pn
+            phi_plus_fuzzy_exp[:, :, e] = pp_f
+            phi_minus_fuzzy_exp[:, :, e] = pm_f
+            phi_net_fuzzy_exp[:, :, e] = pn_f
 
-        # 3) Agregação posterior.
-        phi_plus_now = np.mean(phi_plus_exp, axis=1)
-        phi_minus_now = np.mean(phi_minus_exp, axis=1)
-        phi_now = np.mean(phi_net_exp, axis=1)
+        # 3) Agregação a posteriori NO DOMÍNIO FUZZY.
+        # A defuzzificação ocorre somente após a agregação dos especialistas.
+        phi_plus_fuzzy_now = np.mean(phi_plus_fuzzy_exp, axis=2)
+        phi_minus_fuzzy_now = np.mean(phi_minus_fuzzy_exp, axis=2)
+        phi_fuzzy_now = np.mean(phi_net_fuzzy_exp, axis=2)
+
+        phi_plus_now = np.array([
+            defuzz_coa(x) for x in phi_plus_fuzzy_now
+        ])
+        phi_minus_now = np.array([
+            defuzz_coa(x) for x in phi_minus_fuzzy_now
+        ])
+        phi_now = np.array([
+            defuzz_coa(x) for x in phi_fuzzy_now
+        ])
 
         rank_now = rank_from_net_flow(phi_now)
 

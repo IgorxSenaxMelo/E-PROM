@@ -397,6 +397,52 @@ st.caption(
     "FAHP-Express + Fuzzy PROMETHEE — método generalizado."
 )
 
+# ================================================================
+# MODELOS PARA DOWNLOAD
+# ================================================================
+
+TEMPLATES_DIR = ROOT / "templates"
+EVAL_TEMPLATE = TEMPLATES_DIR / "E_PROM_Avaliacoes_Template.xlsx"
+FAHP_TEMPLATE = TEMPLATES_DIR / "E_PROM_FAHP_Express_Template.xlsx"
+
+st.markdown("### 📥 Baixe as planilhas-modelo")
+st.caption(
+    "Use estes arquivos como ponto de partida. Preencha as avaliações dos "
+    "especialistas e, separadamente, as referências do FAHP-Express."
+)
+
+col_model_1, col_model_2 = st.columns(2)
+
+with col_model_1:
+    if EVAL_TEMPLATE.exists():
+        with open(EVAL_TEMPLATE, "rb") as f:
+            st.download_button(
+                "⬇️ Planilha de Avaliações",
+                data=f.read(),
+                file_name=EVAL_TEMPLATE.name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="download_eval_template",
+            )
+    else:
+        st.warning("Modelo de avaliações não encontrado no pacote.")
+
+with col_model_2:
+    if FAHP_TEMPLATE.exists():
+        with open(FAHP_TEMPLATE, "rb") as f:
+            st.download_button(
+                "⬇️ Planilha FAHP-Express",
+                data=f.read(),
+                file_name=FAHP_TEMPLATE.name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="download_fahp_template",
+            )
+    else:
+        st.warning("Modelo FAHP-Express não encontrado no pacote.")
+
+st.divider()
+
 GUIDE_TEXT = """# E-PROM — Guide
 
 ## 1. Objetivo
