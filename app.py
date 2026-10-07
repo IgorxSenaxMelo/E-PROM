@@ -1907,9 +1907,25 @@ if "result" in st.session_state:
             "precision_levels",
             [["Alta"] * len(data["criteria"]) for _ in fahp.get("expert_names", [])],
         )
+        # Keep the exported precision table dimensionally consistent.
+        precision_rows = len(precision_matrix)
+        expert_names = list(fahp.get("expert_names", []))
+
+        if len(expert_names) != precision_rows:
+            fallback_names = [
+                f"Decision maker {i + 1}"
+                for i in range(precision_rows)
+            ]
+            expert_names = [
+                expert_names[i]
+                if i < len(expert_names) and str(expert_names[i]).strip()
+                else fallback_names[i]
+                for i in range(precision_rows)
+            ]
+
         precision_df = pd.DataFrame(
             precision_matrix,
-            index=fahp.get("expert_names", []),
+            index=expert_names,
             columns=data["criteria"],
         )
         precision_df.index.name = "Decision maker"
