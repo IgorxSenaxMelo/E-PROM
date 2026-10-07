@@ -656,30 +656,28 @@ def get_fahp_decision_maker_names(path, n_experts):
     return names
 
 
-def rebuild_individual_fahp_weights(fahp_path, n_criteria, n_experts):
+def rebuild_individual_fahp_weights(fahp_path, n_criteria, n_experts, canonical_criteria):
     """
-    Rebuild the individual fuzzy-weight tensor without modifying the core.
+    Rebuild individual fuzzy weights while preserving the criterion identity.
 
-    The legacy reader expects a workbook with decision-maker sheets plus its
-    final support/instructions sheet. Therefore each one-expert temporary
-    workbook retains the support sheet while exposing exactly one expert.
-
-    Expected core contract:
-        (criteria, trapezoid_parameters, decision_makers)
-        = (n_criteria, 4, n_experts)
+    The legacy FAHP reader requires each expert's reference criterion to be
+    the first column. Therefore the normalized workbook is intentionally
+    reference-first. Its returned weight vector must be mapped back to the
+    application's canonical criterion order before plotting, aggregation, or
+    any downstream E-PROM operation.
     """
     from openpyxl import load_workbook
 
-    wb = load_workbook(fahp_path, data_only=False)
+    wb = load_workbook(fahp_path, data_only=True)
 
     decision_sheets = [
         ws.title
         for ws in wb.worksheets
-        if _criterion_key(ws.title).casefold() not in {"guide", "_lists"}
+        if _criterion_key(ws.title).casefold() not in {
+            "guide", "_lists", "instructions", "instruções", "orientações"
+        }
     ]
 
-    # normalize_fahp_workbook removes Guide from the computational copy.
-    # Reconstruct the support sheet from the original template when needed.
     if len(decision_sheets) != n_experts:
         raise ValueError(
             "The FAHP-Express workbook contains "
@@ -687,35 +685,23 @@ def rebuild_individual_fahp_weights(fahp_path, n_criteria, n_experts):
             f"expected {n_experts}."
         )
 
-    # Locate a support/instructions sheet if the normalized workbook retained
-    # one. If not, create a minimal structurally valid support sheet. The
-    # support sheet is consumed only by the legacy reader and never by the
-    # mathematical core.
-    support_name = None
-    for ws in wb.worksheets:
-        if _criterion_key(ws.title).casefold() in {
-            "guide", "instructions", "instruções", "orientações"
-        }:
-            support_name = ws.title
-            break
-
+    canonical_keys = [_criterion_key(c).casefold() for c in canonical_criteria]
     individual = []
 
+    # The normalized workbook has the individual reference first, followed
+    # by the remaining canonical criteria. We recover the exact criterion
+    # order from each sheet and then reorder the returned fuzzy weights.
     for sheet_name in decision_sheets:
         single = load_workbook(fahp_path, data_only=False)
 
-        # Keep exactly one decision-maker sheet.
         for ws in list(single.worksheets):
             if ws.title != sheet_name:
                 single.remove(ws)
 
         # The legacy loader requires a final support/instructions sheet.
-        if support_name is not None and support_name in single.sheetnames:
-            pass
-        else:
-            support = single.create_sheet("_Guide")
-            support["A1"] = "Guide"
-            support["A2"] = "FAHP-Express workbook support sheet."
+        support = single.create_sheet("_Guide")
+        support["A1"] = "Guide"
+        support["A2"] = "FAHP-Express workbook support sheet."
 
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
         tmp.close()
@@ -729,7 +715,6 @@ def rebuild_individual_fahp_weights(fahp_path, n_criteria, n_experts):
             )
 
             wf = np.asarray(one["w_fuzzy_individual"], dtype=float)
-
             if wf.ndim == 2 and wf.shape == (n_criteria, 4):
                 wf = wf[:, :, np.newaxis]
 
@@ -740,7 +725,37 @@ def rebuild_individual_fahp_weights(fahp_path, n_criteria, n_experts):
                     f"({n_criteria}, 4, 1)."
                 )
 
-            individual.append(wf[:, :, 0])
+            # Recover the exact criterion order of this expert's normalized
+            # sheet. This is the order used by the legacy reader.
+            original_ws = wb[sheet_name]
+            header_row = _find_fahp_header_row(original_ws)
+            col_map = _criterion_columns(original_ws, header_row, 2)
+
+            sheet_order = [
+                _criterion_key(original_ws.cell(header_row, c).value).casefold()
+                for c in sorted(col_map.values())
+            ]
+
+            if len(sheet_order) != n_criteria:
+                raise ValueError(
+                    f"FAHP sheet '{sheet_name}' contains {len(sheet_order)} "
+                    f"criteria; expected {n_criteria}."
+                )
+
+            pos = {key: i for i, key in enumerate(sheet_order)}
+
+            missing = [key for key in canonical_keys if key not in pos]
+            if missing:
+                raise ValueError(
+                    f"FAHP sheet '{sheet_name}' is missing criteria: "
+                    + ", ".join(missing)
+                )
+
+            # Map reference-first output back to canonical order.
+            reorder = [pos[key] for key in canonical_keys]
+            wf_canonical = wf[reorder, :, 0]
+
+            individual.append(wf_canonical)
 
         finally:
             try:
@@ -750,14 +765,15 @@ def rebuild_individual_fahp_weights(fahp_path, n_criteria, n_experts):
 
     stacked = np.stack(individual, axis=2)
 
-    if stacked.shape != (n_criteria, 4, n_experts):
+    expected = (n_criteria, 4, n_experts)
+    if stacked.shape != expected:
         raise ValueError(
             "The reconstructed individual FAHP weights have dimension "
-            f"{stacked.shape}; expected "
-            f"({n_criteria}, 4, {n_experts})."
+            f"{stacked.shape}; expected {expected}."
         )
 
     return stacked
+
 
 
 def result_df(data, result):
@@ -1776,6 +1792,10 @@ if run:
             # original representation.
             mc_precision_levels = fahp.get("precision_levels")
 
+            # Preserve the legacy MC precision representation across Streamlit
+            # reruns; the E-PROM precision matrix is normalized separately.
+            st.session_state["mc_precision_levels"] = mc_precision_levels
+
             # Read precision directly from all decision-maker sheets.
             # This prevents an older generic reader from collapsing
             # multiple precision rows into a single (1 x N) row.
@@ -1802,6 +1822,7 @@ if run:
                 fahp_path,
                 n_criteria=data["n_criteria"],
                 n_experts=data["n_experts"],
+                canonical_criteria=data["criteria"],
             )
 
             # Use the actual workbook tab names (e.g. IGOR, LUMA) throughout
@@ -2129,6 +2150,11 @@ if "result" in st.session_state:
                 fahp,
                 n_experts=data["n_experts"],
                 n_criteria=data["n_criteria"],
+            )
+
+            mc_precision_levels = st.session_state.get(
+                "mc_precision_levels",
+                fahp.get("precision_levels"),
             )
 
             mc = run_e_prom_monte_carlo(
