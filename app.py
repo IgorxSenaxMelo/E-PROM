@@ -482,53 +482,150 @@ def normalize_fahp_workbook(path, expected_criteria):
 
 
 
+def read_precision_levels_from_workbook(path, criteria, n_experts):
+    """
+    Read Attribute precision directly from every decision-maker sheet.
+
+    This is intentionally kept at the application/input boundary. The
+    computational core continues to receive the same matrix:
+        (decision makers, criteria)
+
+    The previous version relied on the generic FAHP reader, which could
+    collapse the precision rows when the workbook contained multiple
+    decision-maker sheets.
+    """
+    from openpyxl import load_workbook
+
+    def key(value):
+        if value is None:
+            return ""
+        return _criterion_key(value).casefold().strip()
+
+    wb = load_workbook(path, data_only=True)
+
+    sheets = [
+        ws for ws in wb.worksheets
+        if key(ws.title) not in {"guide", "_lists"}
+    ]
+
+    if len(sheets) < n_experts:
+        raise ValueError(
+            "The FAHP-Express workbook contains fewer decision-maker sheets "
+            f"({len(sheets)}) than expected ({n_experts})."
+        )
+
+    criteria_keys = [key(c) for c in criteria]
+    precision = []
+
+    for ws in sheets[:n_experts]:
+        header_row = None
+        header = None
+
+        # Locate the row containing "Criteria".
+        for r in range(1, min(ws.max_row, 30) + 1):
+            values = [
+                ws.cell(r, c).value
+                for c in range(1, ws.max_column + 1)
+            ]
+            if any(
+                isinstance(v, str) and key(v) == "criteria"
+                for v in values
+            ):
+                header_row = r
+                header = values
+                break
+
+        if header_row is None:
+            raise ValueError(
+                f"Could not find the 'Criteria' header in FAHP sheet '{ws.title}'."
+            )
+
+        col_by_key = {}
+        for c in range(2, ws.max_column + 1):
+            k = key(ws.cell(header_row, c).value)
+            if k:
+                col_by_key[k] = c
+
+        # Find "Attribute precision" row.
+        precision_row = None
+        for r in range(header_row + 1, min(ws.max_row, header_row + 8) + 1):
+            first = ws.cell(r, 1).value
+            if isinstance(first, str) and key(first) == "attribute precision":
+                precision_row = r
+                break
+
+        if precision_row is None:
+            raise ValueError(
+                f"Could not find 'Attribute precision' in FAHP sheet '{ws.title}'."
+            )
+
+        row = []
+        for criterion, ck in zip(criteria, criteria_keys):
+            if ck not in col_by_key:
+                # Compatibility with the historical CUSTO/Custo-benefício name.
+                alt = "custo" if ck == "custo-benefício" else None
+                if alt and alt in col_by_key:
+                    col = col_by_key[alt]
+                else:
+                    raise ValueError(
+                        f"Criterion '{criterion}' was not found in FAHP sheet '{ws.title}'."
+                    )
+
+            else:
+                col = col_by_key[ck]
+
+            value = ws.cell(precision_row, col).value
+            if value is None or str(value).strip() == "":
+                value = "High"
+
+            row.append(str(value).strip())
+
+        precision.append(row)
+
+    # Exact core contract: (decision makers, criteria).
+    arr = np.asarray(precision, dtype=object)
+    expected = (n_experts, len(criteria))
+
+    if arr.shape != expected:
+        raise ValueError(
+            "The FAHP-Express precision matrix read from the workbook has "
+            f"dimension {arr.shape}; expected {expected}."
+        )
+
+    return arr.tolist()
+
+
 def normalize_precision_levels_shape(fahp, n_experts, n_criteria):
     """
-    Normalize the precision matrix at the application/core boundary.
-
-    The computational core expects:
-        (number_of_decision_makers, number_of_criteria)
-
-    Some workbook-reader versions return the same information transposed.
-    This adapter accepts either orientation without changing the core.
+    Final defensive normalization for compatibility with older readers.
     """
-    if "precision_levels" not in fahp:
+    raw = fahp.get("precision_levels")
+
+    if raw is None:
         fahp["precision_levels"] = [
-            ["Alta"] * n_criteria
-            for _ in range(n_experts)
+            ["High"] * n_criteria for _ in range(n_experts)
         ]
         return fahp
 
-    raw = fahp["precision_levels"]
     arr = np.asarray(raw, dtype=object)
 
     expected = (n_experts, n_criteria)
     transposed = (n_criteria, n_experts)
 
-    if arr.ndim == 1:
-        if arr.size != n_experts * n_criteria:
-            raise ValueError(
-                "The FAHP-Express precision matrix contains an unexpected "
-                f"number of values: {arr.size}; expected {n_experts * n_criteria}."
-            )
+    if arr.ndim == 1 and arr.size == n_experts * n_criteria:
         arr = arr.reshape(expected)
-
-    elif arr.ndim == 2:
-        if arr.shape == transposed and arr.shape != expected:
-            arr = arr.T
-        elif arr.shape != expected:
-            raise ValueError(
-                "The FAHP-Express precision matrix has dimension "
-                f"{arr.shape}; expected {expected}."
-            )
-    else:
+    elif arr.ndim == 2 and arr.shape == transposed and arr.shape != expected:
+        arr = arr.T
+    elif arr.shape != expected:
+        # Do not silently duplicate a single decision maker. The workbook
+        # reader should be corrected at the source whenever possible.
         raise ValueError(
-            "The FAHP-Express precision matrix must be two-dimensional."
+            "The FAHP-Express precision matrix has dimension "
+            f"{arr.shape}; expected {expected}."
         )
 
     fahp["precision_levels"] = arr.tolist()
     return fahp
-
 
 def result_df(data, result):
     return pd.DataFrame({
@@ -1508,14 +1605,25 @@ if run:
 
             data = preview
 
+            fahp_path = normalize_fahp_workbook(
+                save_uploaded(fahp_file),
+                data["criteria"],
+            )
+
             fahp = read_fahp_workbook(
-                normalize_fahp_workbook(
-                    save_uploaded(fahp_file),
-                    data["criteria"],
-                ),
+                fahp_path,
                 n_criteria=len(
                     data["criteria"]
                 ),
+            )
+
+            # Read precision directly from all decision-maker sheets.
+            # This prevents an older generic reader from collapsing
+            # multiple precision rows into a single (1 x N) row.
+            fahp["precision_levels"] = read_precision_levels_from_workbook(
+                fahp_path,
+                data["criteria"],
+                data["n_experts"],
             )
 
             # Keep the existing computational core unchanged. The workbook
