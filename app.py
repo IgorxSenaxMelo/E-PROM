@@ -481,6 +481,55 @@ def normalize_fahp_workbook(path, expected_criteria):
     return Path(out.name)
 
 
+
+def normalize_precision_levels_shape(fahp, n_experts, n_criteria):
+    """
+    Normalize the precision matrix at the application/core boundary.
+
+    The computational core expects:
+        (number_of_decision_makers, number_of_criteria)
+
+    Some workbook-reader versions return the same information transposed.
+    This adapter accepts either orientation without changing the core.
+    """
+    if "precision_levels" not in fahp:
+        fahp["precision_levels"] = [
+            ["Alta"] * n_criteria
+            for _ in range(n_experts)
+        ]
+        return fahp
+
+    raw = fahp["precision_levels"]
+    arr = np.asarray(raw, dtype=object)
+
+    expected = (n_experts, n_criteria)
+    transposed = (n_criteria, n_experts)
+
+    if arr.ndim == 1:
+        if arr.size != n_experts * n_criteria:
+            raise ValueError(
+                "The FAHP-Express precision matrix contains an unexpected "
+                f"number of values: {arr.size}; expected {n_experts * n_criteria}."
+            )
+        arr = arr.reshape(expected)
+
+    elif arr.ndim == 2:
+        if arr.shape == transposed and arr.shape != expected:
+            arr = arr.T
+        elif arr.shape != expected:
+            raise ValueError(
+                "The FAHP-Express precision matrix has dimension "
+                f"{arr.shape}; expected {expected}."
+            )
+    else:
+        raise ValueError(
+            "The FAHP-Express precision matrix must be two-dimensional."
+        )
+
+    fahp["precision_levels"] = arr.tolist()
+    return fahp
+
+
 def result_df(data, result):
     return pd.DataFrame({
         "Rank": np.asarray(
@@ -1469,6 +1518,15 @@ if run:
                 ),
             )
 
+            # Keep the existing computational core unchanged. The workbook
+            # reader may expose precision as (criteria, decision makers),
+            # while run_e_prom expects (decision makers, criteria).
+            fahp = normalize_precision_levels_shape(
+                fahp,
+                n_experts=data["n_experts"],
+                n_criteria=data["n_criteria"],
+            )
+
             result = run_e_prom(
                 data["evaluations"],
                 fahp["w_fuzzy_individual"],
@@ -1766,6 +1824,12 @@ if "result" in st.session_state:
                     [np.asarray(A, dtype=float)[0, :] for A in A_individual],
                     dtype=float,
                 )
+
+            fahp = normalize_precision_levels_shape(
+                fahp,
+                n_experts=data["n_experts"],
+                n_criteria=data["n_criteria"],
+            )
 
             mc = run_e_prom_monte_carlo(
                 data["evaluations"],
