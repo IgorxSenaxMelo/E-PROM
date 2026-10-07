@@ -133,6 +133,73 @@ def normalize_expert_workbook(path):
     """
     from openpyxl import load_workbook
 
+    # Linguistic FAHP-Express scale.
+    # The core remains numeric; only the spreadsheet input layer translates
+    # the linguistic labels into the existing 1-9 Saaty-compatible values.
+    linguistic_scale = {
+        "equal importance": 1,
+        "weakly more important": 2,
+        "moderately more important": 3,
+        "moderately to strongly more important": 4,
+        "strongly more important": 5,
+        "strongly to very strongly more important": 6,
+        "very strongly more important": 7,
+        "very strongly to extremely more important": 8,
+        "extremely more important": 9,
+    }
+
+    precision_scale = {
+        "high": "Alta",
+        "medium": "Média",
+        "low": "Baixa",
+        # Backward compatibility with existing Portuguese spreadsheets.
+        "alta": "Alta",
+        "média": "Média",
+        "media": "Média",
+        "baixa": "Baixa",
+    }
+
+    def translate_fahp_inputs(ws, header_row, col_map):
+        # Find the two semantic rows by their labels, independently of
+        # criterion order.
+        comparison_row = None
+        precision_row = None
+
+        for r in range(header_row, ws.max_row + 1):
+            label = ws.cell(r, 1).value
+            if label is None:
+                continue
+            key = str(label).strip().casefold()
+            if key == "comparação com referência" or key == "comparison with reference":
+                comparison_row = r
+            elif key == "precisão do atributo" or key == "attribute precision":
+                precision_row = r
+
+        if comparison_row is not None:
+            for col in col_map.values():
+                value = ws.cell(comparison_row, col).value
+                if isinstance(value, str):
+                    key = " ".join(value.strip().casefold().split())
+                    if key in linguistic_scale:
+                        ws.cell(comparison_row, col).value = linguistic_scale[key]
+                    elif key:
+                        # Preserve numeric strings for backward compatibility.
+                        try:
+                            number = float(value.replace(",", "."))
+                            if number.is_integer():
+                                number = int(number)
+                            ws.cell(comparison_row, col).value = number
+                        except ValueError:
+                            pass
+
+        if precision_row is not None:
+            for col in col_map.values():
+                value = ws.cell(precision_row, col).value
+                if isinstance(value, str):
+                    key = " ".join(value.strip().casefold().split())
+                    if key in precision_scale:
+                        ws.cell(precision_row, col).value = precision_scale[key]
+
     wb = load_workbook(path, data_only=False)
     sheets = [
         ws for ws in wb.worksheets
@@ -237,12 +304,27 @@ def normalize_fahp_workbook(path, expected_criteria):
     canonical_keys = [match_key(name) for name in canonical]
 
     for ws in sheets:
-        header_row = _find_header_row(ws, ["Critérios"])
+        header_row = _find_header_row(ws, ["Critérios", "Criteria"])
         if header_row is None:
             raise ValueError(
                 f"Não foi possível localizar o cabeçalho FAHP-Express "
                 f"na aba '{ws.title}'."
             )
+
+        # Normalize English workbook labels back to the legacy labels expected
+        # by data_loader_v73.py. This keeps the computational core unchanged.
+        internal_labels = {
+            "Criteria": "Critérios",
+            "Comparison with reference": "Comparação com referência",
+            "Attribute precision": "Precisão do atributo",
+            "Reference": "Referência",
+            "Interpretation": "Interpretação",
+            "Notes": "Observação",
+        }
+        for r in range(1, ws.max_row + 1):
+            value = ws.cell(r, 1).value
+            if isinstance(value, str) and value.strip() in internal_labels:
+                ws.cell(r, 1).value = internal_labels[value.strip()]
 
         col_map = _criterion_columns(ws, header_row, 2)
         current_names = list(col_map.keys())
@@ -279,6 +361,10 @@ def normalize_fahp_workbook(path, expected_criteria):
                 f"Aba FAHP '{ws.title}' possui critérios diferentes "
                 f"({'; '.join(details)})."
             )
+
+        # Translate the spreadsheet representation only at the input layer.
+        # The core continues to receive the same numeric representation.
+        translate_fahp_inputs(ws, header_row, col_map)
 
         # A referência é individual de cada decisor: é o primeiro critério
         # que estava na aba original. Não usamos a referência da primeira aba.
@@ -324,11 +410,11 @@ def result_df(data, result):
             result["rank_e_prom"],
             dtype=int,
         ),
-        "Alternativa": data["ids"],
-        "Descricao": data["descriptions"],
+        "Alternative": data["ids"],
+        "Description": data["descriptions"],
         "Phi+": result["phi_plus"],
         "Phi-": result["phi_minus"],
-        "Phi líquido": result["phi_net"],
+        "Net Phi": result["phi_net"],
     }).sort_values(
         ["Rank", "Alternativa"]
     ).reset_index(drop=True)
@@ -360,12 +446,12 @@ def excel_bytes(data, result, config, fahp):
 
         phi.to_excel(
             writer,
-            sheet_name="Phi_por_Especialista",
+            sheet_name="Phi_by_Decision_Maker",
         )
 
         config.to_excel(
             writer,
-            sheet_name="Configuracao",
+            sheet_name="Configuration",
             index=False,
         )
 
@@ -374,11 +460,11 @@ def excel_bytes(data, result, config, fahp):
             index=data["criteria"],
             columns=["a", "b", "c", "d"],
         )
-        fuzzy_w.index.name = "Criterio"
+        fuzzy_w.index.name = "Criterion"
 
         fuzzy_w.to_excel(
             writer,
-            sheet_name="Pesos_Fuzzy",
+            sheet_name="Fuzzy_Weights",
         )
 
         precision_matrix = fahp.get(
@@ -390,10 +476,15 @@ def excel_bytes(data, result, config, fahp):
             index=fahp.get("expert_names", []),
             columns=data["criteria"],
         )
-        precision_df.index.name = "Especialista"
+        precision_df = precision_df.replace({
+            "Alta": "High",
+            "Média": "Medium",
+            "Baixa": "Low",
+        })
+        precision_df.index.name = "Decision maker"
         precision_df.to_excel(
             writer,
-            sheet_name="Precisao_Atributos",
+            sheet_name="Attribute_Precision",
         )
 
     out.seek(0)
@@ -422,7 +513,7 @@ def plot_weights(fahp, criteria):
         go.Bar(
             x=criteria,
             y=mean,
-            name="Peso médio",
+            name="Mean weight",
         )
     )
 
@@ -445,9 +536,9 @@ def plot_weights(fahp, criteria):
         )
 
     fig.update_layout(
-        title="Pesos fuzzy — FAHP-Express",
-        xaxis_title="Critério",
-        yaxis_title="Peso",
+        title="Fuzzy criterion weights — FAHP-Express",
+        xaxis_title="Criterion",
+        yaxis_title="Weight",
         height=500,
     )
 
@@ -576,13 +667,13 @@ def plot_relation(data, result):
             colorbar=dict(
                 tickvals=[0, 1, 2, 3],
                 ticktext=["P-", "I", "P", "R"],
-                title="Relação",
+                title="Relation",
             ),
         )
     )
 
     fig.update_layout(
-        title="PROMETHEE I — relações",
+        title="PROMETHEE I — relations",
         height=max(750, len(labels) * 110),
         margin=dict(l=180, r=80, t=80, b=120),
     )
@@ -620,13 +711,13 @@ def plot_rank_heatmap(data, result):
             xgap=1,
             ygap=1,
             colorbar=dict(
-                title="Posição"
+                title="Position"
             ),
         )
     )
 
     fig.update_layout(
-        title="Posições por especialista e E-PROM",
+        title="Positions by decision maker and E-PROM",
         height=max(600, len(labels) * 55),
         margin=dict(l=180, r=80, t=80, b=100),
     )
@@ -654,9 +745,9 @@ def plot_mc_rank_acceptability(data, mc):
         )
     )
     fig.update_layout(
-        title="CPP/Monte Carlo — aceitabilidade das posições",
-        xaxis_title="Posição",
-        yaxis_title="Alternativa",
+        title="CPP/Monte Carlo — rank acceptability",
+        xaxis_title="Position",
+        yaxis_title="Alternative",
         height=max(550, len(labels) * 55),
         margin=dict(l=180, r=80, t=80, b=100),
     )
@@ -680,9 +771,9 @@ def plot_mc_outworking(data, mc):
         )
     )
     fig.update_layout(
-        title="CPP/Monte Carlo — aceitabilidade de sobreclassificação",
-        xaxis_title="Alternativa sobreclassificada",
-        yaxis_title="Alternativa que sobreclassifica",
+        title="CPP/Monte Carlo — outranking acceptability",
+        xaxis_title="Outranked alternative",
+        yaxis_title="Outranking alternative",
         height=max(700, len(labels) * 55),
         margin=dict(l=180, r=120, t=100, b=180),
     )
@@ -691,14 +782,14 @@ def plot_mc_outworking(data, mc):
 
 def mc_summary_df(data, mc):
     return pd.DataFrame({
-        "Alternativa": data["ids"],
-        "Posição média": mc["mean_rank"],
-        "DP posição": mc["std_rank"],
-        "Freq. 1º lugar": 100 * mc["freq_top1"],
-        "Phi médio": mc["mean_phi"],
-        "DP Phi": mc["std_phi"],
+        "Alternative": data["ids"],
+        "Mean position": mc["mean_rank"],
+        "Position SD": mc["std_rank"],
+        "1st-place frequency": 100 * mc["freq_top1"],
+        "Mean Phi": mc["mean_phi"],
+        "Phi SD": mc["std_phi"],
     }).sort_values(
-        "Posição média"
+        "Mean position"
     ).reset_index(drop=True)
 
 # ================================================================
@@ -710,21 +801,105 @@ st.subheader(
     "Express Fuzzy Preference Ranking with PROMETHEE — v7.3"
 )
 st.caption(
-    "FAHP-Express + Fuzzy PROMETHEE — método generalizado."
+    "FAHP-Express + Fuzzy PROMETHEE — generalized method."
 )
 
 # ================================================================
 # MODELOS PARA DOWNLOAD
 # ================================================================
 
+def make_english_linguistic_fahp_template(template_bytes):
+    """Convert the existing FAHP-Express template to the English linguistic-input form.
+
+    This is presentation/input-layer conversion only. The workbook used for
+    computation is converted back to the numeric representation by
+    normalize_fahp_workbook().
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(template_bytes), data_only=False)
+
+    linguistic_terms = {
+        1: "Equal importance",
+        2: "Weakly more important",
+        3: "Moderately more important",
+        4: "Moderately to strongly more important",
+        5: "Strongly more important",
+        6: "Strongly to very strongly more important",
+        7: "Very strongly more important",
+        8: "Very strongly to extremely more important",
+        9: "Extremely more important",
+    }
+
+    for ws in wb.worksheets:
+        if str(ws.title).strip().casefold() == "guide":
+            # Translate the basic guide labels where they exist.
+            for row in ws.iter_rows():
+                for cell in row:
+                    if isinstance(cell.value, str):
+                        cell.value = {
+                            "Campo": "Field",
+                            "Orientação": "Guidance",
+                            "Referência": "Reference",
+                            "Demais critérios": "Other criteria",
+                            "Precisão": "Precision",
+                            "Critérios": "Criteria",
+                            "Decisores": "Decision makers",
+                            "Romance é o critério de referência e recebe comparação 1 consigo mesmo.":
+                                "The reference criterion receives Equal importance (1) against itself.",
+                            "Fator de 1 a 9 indica quanto a referência é mais importante que o critério correspondente.":
+                                "The 1–9 linguistic scale indicates how much more important the reference is than the corresponding criterion.",
+                            "Alta, Média ou Baixa; controla a largura da representação fuzzy.":
+                                "High, Medium, or Low; controls fuzzy representation width.",
+                            "Somente Decisor 1 e Decisor 2 são utilizados.":
+                                "Only Decision maker 1 and Decision maker 2 are used.",
+                        }.get(cell.value, cell.value)
+            continue
+
+        # Translate labels in the first column.
+        for r in range(1, ws.max_row + 1):
+            label = ws.cell(r, 1).value
+            if isinstance(label, str):
+                label_map = {
+                    "Critérios": "Criteria",
+                    "Comparação com referência": "Comparison with reference",
+                    "Precisão do atributo": "Attribute precision",
+                    "Referência": "Reference",
+                    "Interpretação": "Interpretation",
+                    "Observação": "Notes",
+                }
+                ws.cell(r, 1).value = label_map.get(label, label)
+
+        # Replace numeric 1–9 comparison values with linguistic terms.
+        for r in range(1, ws.max_row + 1):
+            label = ws.cell(r, 1).value
+            if str(label).strip().casefold() == "comparison with reference":
+                for c in range(2, ws.max_column + 1):
+                    value = ws.cell(r, c).value
+                    if isinstance(value, (int, float)) and int(value) in linguistic_terms:
+                        ws.cell(r, c).value = linguistic_terms[int(value)]
+
+            if str(label).strip().casefold() == "attribute precision":
+                for c in range(2, ws.max_column + 1):
+                    value = ws.cell(r, c).value
+                    if isinstance(value, str):
+                        pmap = {"Alta": "High", "Média": "Medium", "Baixa": "Low",
+                                "High": "High", "Medium": "Medium", "Low": "Low"}
+                        ws.cell(r, c).value = pmap.get(value.strip(), value)
+
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out.getvalue()
+
+
 TEMPLATES_DIR = ROOT / "templates"
 EVAL_TEMPLATE = TEMPLATES_DIR / "E_PROM_Avaliacoes_Template.xlsx"
 FAHP_TEMPLATE = TEMPLATES_DIR / "E_PROM_FAHP_Express_Template.xlsx"
 
-st.markdown("### 📥 Baixe as planilhas-modelo")
+st.markdown("### 📥 Download the template workbooks")
 st.caption(
-    "Use estes arquivos como ponto de partida. Preencha as avaliações dos "
-    "especialistas e, separadamente, as referências do FAHP-Express."
+    "Use these files as a starting point. Enter the experts’ evaluations and, separately, the FAHP-Express references."
 )
 
 col_model_1, col_model_2 = st.columns(2)
@@ -733,7 +908,7 @@ with col_model_1:
     if EVAL_TEMPLATE.exists():
         with open(EVAL_TEMPLATE, "rb") as f:
             st.download_button(
-                "⬇️ Planilha de Avaliações",
+                "⬇️ Evaluation Workbook",
                 data=f.read(),
                 file_name=EVAL_TEMPLATE.name,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -741,282 +916,225 @@ with col_model_1:
                 key="download_eval_template",
             )
     else:
-        st.warning("Modelo de avaliações não encontrado no pacote.")
+        st.warning("Evaluation template not found in the package.")
 
 with col_model_2:
     if FAHP_TEMPLATE.exists():
         with open(FAHP_TEMPLATE, "rb") as f:
+            template_bytes = make_english_linguistic_fahp_template(f.read())
             st.download_button(
-                "⬇️ Planilha FAHP-Express",
-                data=f.read(),
-                file_name=FAHP_TEMPLATE.name,
+                "⬇️ FAHP-Express Workbook",
+                data=template_bytes,
+                file_name="E_PROM_FAHP_Express_Linguistic_Template.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key="download_fahp_template",
             )
     else:
-        st.warning("Modelo FAHP-Express não encontrado no pacote.")
+        st.warning("FAHP-Express template not found in the package.")
 
 st.divider()
 
 GUIDE_TEXT = """# E-PROM — Guide
 
-## 1. Objetivo
+## 1. Objective
 
-O E-PROM (Express Fuzzy Preference Ranking with PROMETHEE — v7.3) combina:
+The E-PROM (Express Fuzzy Preference Ranking with PROMETHEE — v7.3) combines:
 
-**FAHP-Express → pesos fuzzy dos critérios → Fuzzy PROMETHEE**
+**FAHP-Express → fuzzy criterion weights → Fuzzy PROMETHEE**
 
-O método mantém os pesos fuzzy durante o Fuzzy PROMETHEE e realiza a
-defuzzificação dos fluxos no final.
-
----
-
-## 2. Arquivo de avaliações
-
-A planilha de avaliações deve possuir:
-
-- uma aba por especialista;
-- uma última aba chamada `Guide`, que não é processada;
-- coluna A: ID da alternativa;
-- coluna B: descrição;
-- coluna C em diante: critérios.
-
-Todos os especialistas devem usar os mesmos IDs, descrições e nomes de critérios.
-
-### Exemplo
-
-| ID | Descrição | Impacto | Custo | Prazo |
-|---|---|---:|---:|---:|
-| R1 | Alternativa 1 | 7 | 300000 | 12 |
-| R2 | Alternativa 2 | 5 | 250000 | 18 |
+The method keeps fuzzy weights during Fuzzy PROMETHEE and applies defuzzification
+to the final flows.
 
 ---
 
-## 3. Tipo do critério
+## 2. Evaluation file
+
+The evaluation workbook must contain:
+
+- one sheet per decision maker;
+- a final sheet named `Guide`, which is not processed;
+- column A: alternative ID;
+- column B: description;
+- column C onward: criteria.
+
+All decision makers must use the same alternative IDs, descriptions, and criterion names.
+The order of criteria may differ between decision makers; the application aligns them
+by criterion name while preserving each decision maker's own reference criterion.
+
+---
+
+## 3. Criterion type
 
 ### Ordinal
 
-Use quando a avaliação é uma escala ordenada, por exemplo:
+Use when the evaluation is an ordered scale, for example:
 
 - 1–5;
 - 1–7;
 - 1–9.
 
-Funções permitidas:
+Allowed preference functions:
 
 - **Usual**
 - **Level**
 
-O valor ordinal é convertido para um número fuzzy trapezoidal.
+The ordinal value is converted to a trapezoidal fuzzy number.
 
-### Contínuo
+### Continuous
 
-Use para grandezas como:
+Use for quantities such as:
 
-- custo em R$;
-- prazo em meses;
-- distância;
-- tempo;
-- consumo;
-- desempenho físico.
+- cost;
+- schedule;
+- distance;
+- time;
+- consumption;
+- physical performance.
 
-Funções permitidas:
+Allowed preference functions:
 
 - **U-shape**
 - **V-shape**
 - **Linear**
 
-O valor permanece na unidade original. Não é convertido para 1–7.
-
-### Representação fuzzy dos atributos contínuos
-
-Na versão atual, cada valor contínuo observado x é representado por um
-número fuzzy trapezoidal cuja largura depende da **precisão do atributo**.
-A configuração é informada na planilha FAHP-Express.
-
-A transformação utilizada é:
-
-`x~ = [x(1-rs), x(1-rc), x(1+rc), x(1+rs)]`
-
-onde `rs` é a amplitude relativa do suporte externo e `rc` a amplitude
-relativa do núcleo, com `0 <= rc <= rs`. Assim, maior precisão implica
-menor dispersão fuzzy.
-
-Parâmetros padrão:
-
-- **Alta:** suporte ±5%; núcleo ±2%;
-- **Média:** suporte ±10%; núcleo ±4%;
-- **Baixa:** suporte ±16,6667%; núcleo ±6,6667%.
-
-Por exemplo, para `x = 300000` e precisão **Baixa**:
-
-`x~ ≈ [250000, 280000, 320000, 350000]`
-
-Os percentuais são parâmetros operacionais do modelo e podem ser ajustados
-no arquivo FAHP-Express conforme a justificativa do estudo.
+The value remains in its original unit.
 
 ---
 
-## 4. Limiar q e p
+## 4. FAHP-Express linguistic input
 
-### U-shape
+The FAHP-Express workbook accepts linguistic comparison terms instead of numeric
+comparison factors:
 
-`q` representa o limiar de indiferença.
+| Value | Linguistic term |
+|---:|---|
+| 1 | Equal importance |
+| 2 | Weakly more important |
+| 3 | Moderately more important |
+| 4 | Moderately to strongly more important |
+| 5 | Strongly more important |
+| 6 | Strongly to very strongly more important |
+| 7 | Very strongly more important |
+| 8 | Very strongly to extremely more important |
+| 9 | Extremely more important |
 
-### V-shape
+Each decision maker may use a different reference criterion. The reference
+criterion receives **Equal importance (1)**.
 
-`p` representa o limiar de preferência.
+The application translates these terms internally to the numeric 1–9 scale
+before calling the existing FAHP-Express core. The mathematical core is unchanged.
 
-### Linear
+### Attribute precision
 
-Usa os dois:
+Use:
 
-- `q`: limiar de indiferença;
-- `p`: limiar de preferência.
+- **High**
+- **Medium**
+- **Low**
 
-Sempre use a unidade original do critério.
-
-Exemplo:
-
-Custo em reais:
-
-`q = 10000`
-
-`p = 50000`
-
-Prazo em meses:
-
-`q = 1`
-
-`p = 4`
-
----
-
-## 5. FAHP-Express
-
-Na planilha FAHP-Express, cada especialista informa uma linha de referência
-a partir da célula B4.
-
-A linha deve possuir exatamente o mesmo número de critérios da planilha
-de avaliações.
-
-O E-PROM reconstrói as comparações par a par e calcula os pesos fuzzy pelo
-procedimento de Buckley.
+These labels are converted internally to the existing precision representation.
 
 ---
 
-## 6. Pesos fuzzy no Fuzzy PROMETHEE
+## 5. Reference criterion
 
-O E-PROM não defuzzifica os pesos antes do PROMETHEE.
+Each decision maker may select a different reference criterion.
 
-Para cada critério:
+For example:
 
-`peso fuzzy × preferência fuzzy`
+- Decision maker 1 → Romance;
+- Decision maker 2 → Memorable experiences.
 
-Os termos são agregados para obter os fluxos fuzzy:
+The reference criterion does not need to be the same across decision makers.
+
+The application identifies the reference from the first criterion in each FAHP-Express
+sheet, as required by the existing data loader, while preserving the criterion identity.
+
+---
+
+## 6. Fuzzy PROMETHEE
+
+The E-PROM does not defuzzify the criterion weights before PROMETHEE.
+
+For each criterion:
+
+`fuzzy weight × fuzzy preference`
+
+The terms are aggregated to obtain fuzzy flows:
 
 - Φ+;
 - Φ−;
-- Φ líquido.
+- net Φ.
 
-A defuzzificação pelo centro de área é aplicada aos fluxos finais para
-obter o ranking.
+Defuzzification by center of area is applied to the final flows to obtain the ranking.
 
 ---
 
 ## 7. Monte Carlo / CPP
 
-O módulo de Monte Carlo avalia a estabilidade do resultado, preservando
-a informação fuzzy durante a agregação dos especialistas.
+The Monte Carlo module evaluates the stability of the result while preserving
+the fuzzy information during expert aggregation.
 
-### Critérios ordinais
+### Ordinal criteria
 
-A distribuição é **empírica**, construída diretamente a partir das
-respostas dos especialistas.
+The distribution is empirical, constructed directly from the experts' responses.
 
-Para cada alternativa e critério, uma resposta observada entre os
-especialistas é sorteada de acordo com sua frequência.
+### Continuous criteria
 
-Assim, se 10 especialistas responderam:
+The user specifies a percentage variation.
 
-`7, 7, 6, 5, 7, 6, 7, 4, 7, 6`
+### Weights
 
-a distribuição usada na simulação preserva essas frequências.
-
-### Critérios contínuos
-
-O usuário informa uma variação percentual.
-
-Exemplo:
-
-`20%`
-
-O valor observado `x` é simulado em:
-
-`[0,80x ; 1,20x]`
-
-por amostragem uniforme.
-
-A variação é configurada individualmente para cada critério contínuo.
-
-### Pesos
-
-Em cada iteração, os valores de referência do FAHP-Express também são
-reamostrados empiricamente a partir dos especialistas e um novo conjunto
-de pesos fuzzy é calculado.
+At each iteration, the individual FAHP-Express reference rows are resampled
+and a new set of fuzzy weights is calculated.
 
 ---
 
-## 8. Principais resultados do Monte Carlo
+## 8. Main Monte Carlo results
 
-O E-PROM calcula:
+The E-PROM calculates:
 
-- posição média;
-- desvio-padrão da posição;
-- Φ líquido médio;
-- desvio-padrão de Φ líquido;
-- frequência de 1º lugar;
-- matriz de aceitabilidade de ranking;
-- matriz de aceitabilidade de sobreclassificação PROMETHEE I;
-- distribuição dos pesos dos critérios.
-
-O módulo não possui classificação `KEY` nem grupos específicos do domínio
-militar.
+- mean position;
+- standard deviation of position;
+- mean net Φ;
+- standard deviation of net Φ;
+- first-place frequency;
+- rank acceptability matrix;
+- PROMETHEE I outranking acceptability matrix;
+- criterion-weight distributions.
 
 ---
 
-## 9. Interpretação
+## 9. Interpretation
 
-Em cada simulação, os fluxos dos especialistas são agregados no domínio
-fuzzy e somente o fluxo fuzzy agregado é defuzzificado para obter o ranking.
+The probabilistic analysis should be used as a stability analysis, not as an
+automatic replacement for the deterministic ranking.
 
-A análise probabilística deve ser usada como análise de estabilidade,
-não como substituição automática do ranking determinístico.
+Useful results include:
 
-Resultados úteis incluem:
-
-- frequência com que uma alternativa ocupa cada posição;
-- frequência de 1º lugar;
-- dispersão de Φ;
-- sensibilidade dos pesos;
-- probabilidade de sobreclassificação entre pares.
+- frequency with which an alternative occupies each position;
+- first-place frequency;
+- Φ dispersion;
+- weight sensitivity;
+- pairwise outranking probability.
 
 ---
 
-## 10. Fluxo recomendado
+## 10. Recommended workflow
 
-1. Preparar as avaliações dos especialistas.
-2. Preparar o FAHP-Express.
-3. Configurar tipo e direção dos critérios.
-4. Selecionar a função de preferência.
-5. Definir q e/ou p.
-6. Executar o E-PROM determinístico.
-7. Verificar o ranking e as relações PROMETHEE I.
-8. Executar o Monte Carlo/CPP.
-9. Avaliar estabilidade e aceitabilidade das posições.
-10. Exportar os resultados.
+1. Prepare the decision makers' evaluations.
+2. Prepare the FAHP-Express workbook using linguistic comparison terms.
+3. Configure criterion type and direction.
+4. Select the preference function.
+5. Define q and/or p.
+6. Run deterministic E-PROM.
+7. Check the ranking and PROMETHEE I relations.
+8. Run Monte Carlo/CPP.
+9. Evaluate stability and position acceptability.
+10. Export the results.
 """
+
 
 
 # ================================================================
@@ -1025,15 +1143,15 @@ Resultados úteis incluem:
 
 with st.sidebar:
 
-    st.header("1. Entradas")
+    st.header("1. Inputs")
 
     req_file = st.file_uploader(
-        "Planilha das avaliações",
+        "Evaluation workbook",
         type=["xlsx"],
     )
 
     fahp_file = st.file_uploader(
-        "Planilha FAHP-Express",
+        "FAHP-Express workbook",
         type=["xlsx"],
     )
 
@@ -1051,17 +1169,16 @@ with st.sidebar:
             ncrit = len(criteria)
 
             st.success(
-                f"{preview['n_experts']} especialistas · "
-                f"{preview['n_requirements']} alternativas · "
-                f"{ncrit} critérios"
+                f"{preview['n_experts']} decision makers · "
+                f"{preview['n_requirements']} alternatives · "
+                f"{ncrit} criteria"
             )
 
             st.divider()
-            st.header("2. Configuração dos critérios")
+            st.header("2. Criterion configuration")
 
             st.info(
-                "Ordinal: Usual ou Level. "
-                "Contínuo: U-shape, V-shape ou Linear."
+                "Ordinal: Usual or Level. Continuous: U-shape, V-shape, or Linear."
             )
 
             dirs = []
@@ -1080,29 +1197,31 @@ with st.sidebar:
                     f"### {criterion}"
                 )
 
-                typ = st.selectbox(
-                    "Tipo de dado",
-                    ["Ordinal", "Contínuo"],
+                typ_display = st.selectbox(
+                    "Data type",
+                    ["Ordinal", "Continuous"],
                     key=f"type_{k}",
                 )
+                # Preserve the existing internal representation used by the core.
+                typ = "Ordinal" if typ_display == "Ordinal" else "Contínuo"
 
                 direction_name = st.selectbox(
-                    "Direção",
-                    ["Maximizar", "Minimizar"],
+                    "Direction",
+                    ["Maximize", "Minimize"],
                     key=f"direction_{k}",
                 )
 
                 if typ == "Ordinal":
 
                     scale = st.selectbox(
-                        "Escala ordinal",
+                        "Ordinal scale",
                         [5, 7, 9],
                         index=1,
                         key=f"scale_{k}",
                     )
 
                     pref_name = st.selectbox(
-                        "Função de preferência",
+                        "Preference function",
                         ["Usual", "Level"],
                         key=f"pref_{k}",
                     )
@@ -1113,7 +1232,7 @@ with st.sidebar:
                     else:
 
                         q = st.number_input(
-                            "q — indiferença",
+                            "q — indifference",
                             min_value=0.0,
                             value=0.0,
                             step=1.0,
@@ -1121,7 +1240,7 @@ with st.sidebar:
                         )
 
                         p = st.number_input(
-                            "p — preferência",
+                            "p — preference",
                             min_value=float(q + 1e-9),
                             value=float(q + 1),
                             step=1.0,
@@ -1132,13 +1251,13 @@ with st.sidebar:
 
                     scale = 0
                     st.caption(
-                        "O valor contínuo é representado por um trapezoide fuzzy "
+                        "Continuous values are represented by a trapezoidal fuzzy number. "
                         "na unidade original. A largura do trapezoide é definida "
                         "pela precisão informada na planilha FAHP-Express."
                     )
 
                     pref_name = st.selectbox(
-                        "Função de preferência",
+                        "Preference function",
                         [
                             "U-shape",
                             "V-shape",
@@ -1150,7 +1269,7 @@ with st.sidebar:
                     if pref_name == "U-shape":
 
                         q = st.number_input(
-                            "q — limiar de indiferença",
+                            "q — indifference threshold",
                             min_value=0.0,
                             value=0.0,
                             step=1.0,
@@ -1168,7 +1287,7 @@ with st.sidebar:
                         q = 0.0
 
                         p = st.number_input(
-                            "p — limiar de preferência",
+                            "p — preference threshold",
                             min_value=1e-9,
                             value=1.0,
                             step=1.0,
@@ -1182,7 +1301,7 @@ with st.sidebar:
                     else:  # Linear
 
                         q = st.number_input(
-                            "q — limiar de indiferença",
+                            "q — indifference threshold",
                             min_value=0.0,
                             value=0.0,
                             step=1.0,
@@ -1190,7 +1309,7 @@ with st.sidebar:
                         )
 
                         p = st.number_input(
-                            "p — limiar de preferência",
+                            "p — preference threshold",
                             min_value=float(q + 1e-9),
                             value=float(q + 1),
                             step=1.0,
@@ -1201,7 +1320,7 @@ with st.sidebar:
 
                 dirs.append(
                     1
-                    if direction_name == "Maximizar"
+                    if direction_name == "Maximize"
                     else -1
                 )
 
@@ -1212,26 +1331,26 @@ with st.sidebar:
                 scales.append(scale)
 
                 rows.append({
-                    "Criterio": criterion,
-                    "Tipo": typ,
-                    "Direção": direction_name,
-                    "Função": pref_name,
+                    "Criterion": criterion,
+                    "Type": typ_display,
+                    "Direction": direction_name,
+                    "Preference": pref_name,
                     "q": q,
                     "p": p,
-                    "Escala": (
+                    "Scale": (
                         scale
                         if typ == "Ordinal"
-                        else "Contínua"
+                        else "Continuous"
                     ),
                 })
 
             config = pd.DataFrame(rows)
 
             st.divider()
-            st.header("3. Execução")
+            st.header("3. Execution")
 
             run = st.button(
-                "▶ Executar E-PROM",
+                "▶ Run E-PROM",
                 type="primary",
                 use_container_width=True,
             )
@@ -1239,7 +1358,7 @@ with st.sidebar:
         except Exception as exc:
 
             st.error(
-                f"Erro ao ler a planilha: {exc}"
+                f"Error reading the workbook: {exc}"
             )
 
 
@@ -1251,14 +1370,14 @@ if run:
 
     if fahp_file is None:
         st.error(
-            "Envie a planilha FAHP-Express."
+            "Upload the FAHP-Express workbook."
         )
         st.stop()
 
     try:
 
         with st.spinner(
-            "Executando FAHP-Express + Fuzzy PROMETHEE..."
+            "Running FAHP-Express + Fuzzy PROMETHEE..."
         ):
 
             data = preview
@@ -1290,10 +1409,20 @@ if run:
                 result,
             )
 
+            export_config = config.rename(columns={
+                "Criterio": "Criterion",
+                "Critério": "Criterion",
+                "Tipo": "Type",
+                "Direção": "Direction",
+                "Função": "Preference",
+                "q": "q",
+                "p": "p",
+                "Escala": "Scale",
+            }).copy()
             xlsx = excel_bytes(
                 data,
                 result,
-                config,
+                export_config,
                 fahp,
             )
 
@@ -1307,7 +1436,7 @@ if run:
         )
 
         st.success(
-            "E-PROM executado com sucesso."
+            "E-PROM completed successfully."
         )
 
     except Exception as exc:
@@ -1332,17 +1461,17 @@ if "result" in st.session_state:
     a, b, c = st.columns(3)
 
     a.metric(
-        "Especialistas",
+        "Decision makers",
         data["n_experts"],
     )
 
     b.metric(
-        "Alternativas",
+        "Alternatives",
         data["n_requirements"],
     )
 
     c.metric(
-        "Critérios",
+        "Criteria",
         data["n_criteria"],
     )
 
@@ -1350,7 +1479,7 @@ if "result" in st.session_state:
         [
             "🏆 Ranking",
             "📈 PROMETHEE",
-            "👥 Especialistas",
+            "👥 Decision Makers",
             "🎲 CPP / Monte Carlo",
             "📘 Guide",
         ]
@@ -1365,9 +1494,9 @@ if "result" in st.session_state:
         )
 
         st.download_button(
-            "⬇️ Baixar resultado em Excel",
+            "⬇️ Download results as Excel",
             data=st.session_state["xlsx"],
-            file_name="Resultado_E_PROM.xlsx",
+            file_name="E_PROM_Results.xlsx",
             mime=(
                 "application/vnd.openxmlformats-officedocument."
                 "spreadsheetml.sheet"
@@ -1376,23 +1505,22 @@ if "result" in st.session_state:
 
     with tab2:
 
-        st.subheader("Pesos fuzzy dos critérios")
+        st.subheader("Fuzzy criterion weights")
         st.caption(
-            "Pesos obtidos pelo FAHP-Express. Os números fuzzy são mantidos "
-            "durante o Fuzzy PROMETHEE e não são defuzzificados nesta etapa."
+            "Weights obtained by FAHP-Express. Fuzzy numbers are preserved during Fuzzy PROMETHEE and are not defuzzified at this stage."
         )
         fuzzy_weights_df = pd.DataFrame(
             np.asarray(fahp["w_fuzzy_group"], dtype=float),
             index=data["criteria"],
             columns=["a", "b", "c", "d"],
         )
-        fuzzy_weights_df.index.name = "Critério"
+        fuzzy_weights_df.index.name = "Criterion"
         st.dataframe(
             fuzzy_weights_df.style.format("{:.6f}"),
             use_container_width=True,
         )
 
-        st.subheader("Precisão dos atributos")
+        st.subheader("Attribute precision")
         precision_matrix = fahp.get(
             "precision_levels",
             [["Alta"] * len(data["criteria"]) for _ in fahp.get("expert_names", [])],
@@ -1402,14 +1530,14 @@ if "result" in st.session_state:
             index=fahp.get("expert_names", []),
             columns=data["criteria"],
         )
-        precision_df.index.name = "Especialista"
+        precision_df.index.name = "Decision maker"
         st.dataframe(precision_df, use_container_width=True)
         st.caption(
-            "A precisão é definida individualmente por especialista e critério. "
-            "Alta = menor incerteza, Média = intermediária e Baixa = maior "
-            "incerteza. Para contínuos, a unidade original é preservada; para "
-            "ordinais, a largura fuzzy é ajustada em unidades da escala, "
-            "respeitando seus limites."
+            "Precision is defined individually for each decision maker and criterion. "
+            "High = lower uncertainty, Medium = intermediate, and Low = higher "
+            "uncertainty. For continuous criteria, the original unit is preserved; for "
+            "ordinal criteria, fuzzy width is adjusted in scale units, "
+            "respecting their limits."
         )
 
         st.plotly_chart(
@@ -1447,7 +1575,7 @@ if "result" in st.session_state:
         phi_df.index.name = "Alternativa"
 
         st.subheader(
-            "Phi líquido por especialista"
+            "Net Phi by decision maker"
         )
 
         st.dataframe(
@@ -1456,7 +1584,7 @@ if "result" in st.session_state:
         )
 
         st.subheader(
-            "Configuração"
+            "Configuration"
         )
 
         st.dataframe(
@@ -1467,22 +1595,22 @@ if "result" in st.session_state:
 
     with tab4:
 
-        st.subheader("CPP / Monte Carlo — estabilidade do E-PROM")
+        st.subheader("CPP / Monte Carlo — E-PROM stability")
 
         st.markdown(
-            "Para **critérios ordinais**, a incerteza é obtida empiricamente "
-            "das respostas dos especialistas. Para **critérios contínuos**, "
-            "informe a variação percentual ± desejada."
+            "For **ordinal criteria**, uncertainty is obtained empirically "
+            "from decision makers’ responses. For **continuous criteria**, "
+            "enter the desired percentage variation."
         )
         st.info(
-            "No E-PROM, os fluxos dos especialistas permanecem fuzzy durante "
-            "a agregação. A defuzzificação ocorre somente após a agregação "
-            "fuzzy, em cada simulação."
+            "In E-PROM, decision makers’ flows remain fuzzy during "
+            "aggregation. Defuzzification occurs only after fuzzy aggregation "
+            "in each simulation."
         )
 
         continuous_idx = [
-            i for i, typ in enumerate(config["Tipo"])
-            if typ == "Contínuo"
+            i for i, typ in enumerate(config["Type"])
+            if typ == "Continuous"
         ]
 
         variation = []
@@ -1491,13 +1619,13 @@ if "result" in st.session_state:
                 default = 20.0
                 variation.append(
                     st.number_input(
-                        f"Variação de {criterion} (%)",
+                        f"Variation for {criterion} (%)",
                         min_value=0.0,
                         max_value=1000.0,
                         value=default,
                         step=5.0,
                         key=f"mc_var_{k}",
-                        help="Aplica ± percentual ao valor observado de cada especialista.",
+                        help="Applies ± percentage variation to each observed decision-maker value.",
                     )
                 )
             else:
@@ -1506,7 +1634,7 @@ if "result" in st.session_state:
         col1, col2, col3 = st.columns(3)
         with col1:
             n_mc = st.number_input(
-                "Número de simulações",
+                "Number of simulations",
                 min_value=100,
                 max_value=500000,
                 value=2000,
@@ -1523,12 +1651,12 @@ if "result" in st.session_state:
             )
         with col3:
             st.metric(
-                "Critérios contínuos",
+                "Continuous criteria",
                 len(continuous_idx),
             )
 
         if st.button(
-            "▶ Executar CPP / Monte Carlo",
+            "▶ Run CPP / Monte Carlo",
             type="primary",
             key="run_mc",
         ):
@@ -1551,9 +1679,9 @@ if "result" in st.session_state:
                 A_individual = fahp.get("A_individual")
                 if A_individual is None:
                     st.error(
-                        "Não foi possível recuperar as respostas de referência "
-                        "do FAHP-Express para o CPP/Monte Carlo. Reexecute o "
-                        "E-PROM com a planilha FAHP-Express atualizada."
+                        "Could not recover the FAHP-Express reference inputs "
+                        "from FAHP-Express for CPP/Monte Carlo. Re-run "
+                        "E-PROM with the updated FAHP-Express workbook."
                     )
                     st.stop()
 
@@ -1584,7 +1712,7 @@ if "result" in st.session_state:
             mc = st.session_state["mc"]
 
             st.success(
-                f"Monte Carlo concluído: {mc['n_mc']:,} simulações."
+                f"Monte Carlo completed: {mc['n_mc']:,} simulations."
             )
 
             st.dataframe(
@@ -1608,7 +1736,7 @@ if "result" in st.session_state:
                 columns=data["criteria"],
             )
 
-            st.subheader("Distribuição dos pesos")
+            st.subheader("Weight distribution")
             st.dataframe(
                 w_df.describe().T[
                     ["mean", "std", "min", "max"]
@@ -1617,14 +1745,14 @@ if "result" in st.session_state:
             )
 
             st.download_button(
-                "⬇️ Baixar resultados do Monte Carlo",
+                "⬇️ Download Monte Carlo results",
                 data=pd.DataFrame({
-                    "Alternativa": data["ids"],
-                    "Posição média": mc["mean_rank"],
-                    "DP posição": mc["std_rank"],
-                    "Freq. 1º lugar (%)": 100 * mc["freq_top1"],
-                    "Phi médio": mc["mean_phi"],
-                    "DP Phi": mc["std_phi"],
+                    "Alternative": data["ids"],
+                    "Mean position": mc["mean_rank"],
+                    "Position SD": mc["std_rank"],
+                    "1st-place frequency (%)": 100 * mc["freq_top1"],
+                    "Mean Phi": mc["mean_phi"],
+                    "Phi SD": mc["std_phi"],
                 }).to_csv(index=False).encode("utf-8-sig"),
                 file_name="E_PROM_CPP_MonteCarlo.csv",
                 mime="text/csv",
