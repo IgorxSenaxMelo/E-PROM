@@ -2143,49 +2143,89 @@ if "result" in st.session_state:
                 n_criteria=data["n_criteria"],
             )
 
-            # IMPORTANT: the E-PROM core and the legacy Monte Carlo module
-            # use different orientations for the precision matrix.
+            # Monte Carlo compatibility boundary.
             #
-            # E-PROM:
-            #     (n_experts, n_criteria) = (2, 8)
+            # The FAHP workbook is stored canonically as:
+            #     (n_experts, n_criteria)
             #
-            # Monte Carlo legacy contract:
-            #     (n_criteria, n_experts) = (8, 2)
-            #
-            # The workbook is read once into the canonical E-PROM orientation
-            # and transposed only at this boundary. The Monte Carlo algorithm
-            # itself remains unchanged.
+            # Different historical Monte Carlo implementations used either
+            # this orientation or its transpose. The computational algorithm
+            # is not changed here: we only adapt the input representation.
             precision_arr = np.asarray(
                 fahp["precision_levels"],
                 dtype=object,
             )
-            expected_eprom_shape = (
+            expected_shape = (
                 data["n_experts"],
                 data["n_criteria"],
             )
-            if precision_arr.shape != expected_eprom_shape:
+            transposed_shape = (
+                data["n_criteria"],
+                data["n_experts"],
+            )
+
+            if precision_arr.shape != expected_shape:
                 raise ValueError(
                     "Internal precision matrix has dimension "
-                    f"{precision_arr.shape}; expected "
-                    f"{expected_eprom_shape} before Monte Carlo."
+                    f"{precision_arr.shape}; expected {expected_shape}."
                 )
 
-            mc_precision_levels = precision_arr.T.tolist()
+            # Keep the reference rows in the same canonical expert × criterion
+            # orientation. If a legacy reader returned criterion × expert,
+            # normalize it before the MC call.
+            ref_arr = np.asarray(reference_rows, dtype=float)
+            if ref_arr.shape == expected_shape:
+                reference_candidates = [ref_arr]
+            elif ref_arr.shape == transposed_shape:
+                reference_candidates = [ref_arr.T]
+            else:
+                raise ValueError(
+                    "FAHP-Express reference rows have dimension "
+                    f"{ref_arr.shape}; expected {expected_shape}."
+                )
 
-            mc = run_e_prom_monte_carlo(
-                data["evaluations"],
-                reference_rows,
-                types,
-                dirs,
-                prefs,
-                qs,
-                ps,
-                scales,
-                variation,
-                n_mc=int(n_mc),
-                seed=int(seed),
-                precision_levels=mc_precision_levels,
-            )
+            # Try the canonical E-PROM orientation first. If the installed
+            # Monte Carlo module still follows the older transposed contract,
+            # retry with the transpose. This keeps the Monte Carlo core
+            # untouched while making the application compatible with both
+            # versions.
+            mc = None
+            mc_errors = []
+
+            for candidate_precision in (
+                precision_arr,
+                precision_arr.T,
+            ):
+                try:
+                    mc = run_e_prom_monte_carlo(
+                        data["evaluations"],
+                        reference_candidates[0],
+                        types,
+                        dirs,
+                        prefs,
+                        qs,
+                        ps,
+                        scales,
+                        variation,
+                        n_mc=int(n_mc),
+                        seed=int(seed),
+                        precision_levels=candidate_precision.tolist(),
+                    )
+                    break
+                except (ValueError, TypeError, IndexError) as exc:
+                    mc_errors.append(str(exc))
+
+            if mc is None:
+                detail = (
+                    mc_errors[-1]
+                    if mc_errors
+                    else "unknown Monte Carlo input error"
+                )
+                raise ValueError(
+                    "Monte Carlo could not accept the FAHP-Express inputs. "
+                    f"Precision shapes tried: {expected_shape} and "
+                    f"{transposed_shape}. Last error: {detail}"
+                )
 
             st.session_state["mc"] = mc
 
