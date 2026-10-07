@@ -528,7 +528,8 @@ def read_precision_levels_from_workbook(path, criteria, n_experts):
                 for c in range(1, ws.max_column + 1)
             ]
             if any(
-                isinstance(v, str) and key(v) == "criteria"
+                isinstance(v, str)
+                and key(v) in {"criteria", "critérios"}
                 for v in values
             ):
                 header_row = r
@@ -550,7 +551,10 @@ def read_precision_levels_from_workbook(path, criteria, n_experts):
         precision_row = None
         for r in range(header_row + 1, min(ws.max_row, header_row + 8) + 1):
             first = ws.cell(r, 1).value
-            if isinstance(first, str) and key(first) == "attribute precision":
+            if isinstance(first, str) and key(first) in {
+                "attribute precision",
+                "precisão do atributo",
+            }:
                 precision_row = r
                 break
 
