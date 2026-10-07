@@ -47,6 +47,164 @@ def save_uploaded(f):
     return Path(tmp.name)
 
 
+def _criterion_key(value):
+    """Normaliza apenas espaços externos para comparação de nomes."""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _find_header_row(ws, required_headers, max_scan_rows=20):
+    """Localiza a linha de cabeçalho pelo conjunto de nomes esperado."""
+    required = {_criterion_key(x).casefold() for x in required_headers}
+    for r in range(1, min(ws.max_row, max_scan_rows) + 1):
+        values = {
+            _criterion_key(ws.cell(r, c).value).casefold()
+            for c in range(1, ws.max_column + 1)
+        }
+        if required.issubset(values):
+            return r
+    return None
+
+
+def _criterion_columns(ws, header_row, first_criterion_col):
+    """Retorna {nome_do_criterio: coluna} a partir do cabeçalho."""
+    result = {}
+    for c in range(first_criterion_col, ws.max_column + 1):
+        value = _criterion_key(ws.cell(header_row, c).value)
+        if not value:
+            continue
+        if value in result:
+            raise ValueError(
+                f"Critério duplicado na aba '{ws.title}': '{value}'."
+            )
+        result[value] = c
+    return result
+
+
+def _reorder_columns_in_place(ws, header_row, first_criterion_col, canonical):
+    """Reordena somente o bloco de critérios, preservando os valores associados."""
+    col_map = _criterion_columns(ws, header_row, first_criterion_col)
+    current = list(col_map.keys())
+
+    canonical_keys = [_criterion_key(x) for x in canonical]
+    current_keys = [_criterion_key(x) for x in current]
+
+    if set(current_keys) != set(canonical_keys):
+        missing = [x for x in canonical_keys if x not in current_keys]
+        extra = [x for x in current_keys if x not in canonical_keys]
+        details = []
+        if missing:
+            details.append("ausentes: " + ", ".join(missing))
+        if extra:
+            details.append("extras: " + ", ".join(extra))
+        raise ValueError(
+            f"Aba '{ws.title}' possui critérios diferentes dos demais especialistas "
+            f"({'; '.join(details)})."
+        )
+
+    # Nenhuma alteração é feita quando a ordem já é a mesma.
+    if current_keys == canonical_keys:
+        return
+
+    # O aplicativo trabalha com os valores das células. Fazemos a reordenação
+    # em uma cópia dos valores para que cada avaliação/referência permaneça
+    # ligada ao nome do critério, independentemente da posição da coluna.
+    max_row = ws.max_row
+    snapshots = {
+        name: [ws.cell(r, col_map[name]).value for r in range(header_row, max_row + 1)]
+        for name in canonical_keys
+    }
+
+    target_cols = [col_map[name] for name in current_keys]
+    target_cols.sort()
+
+    for target_col, name in zip(target_cols, canonical_keys):
+        values = snapshots[name]
+        for offset, value in enumerate(values):
+            ws.cell(header_row + offset, target_col).value = value
+
+
+def normalize_expert_workbook(path):
+    """
+    Aceita especialistas com os mesmos critérios em ordens diferentes.
+    A primeira aba de especialista define a ordem canônica; nas demais,
+    as colunas são realinhadas pelo nome do critério, sem alterar os valores.
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path, data_only=False)
+    sheets = [
+        ws for ws in wb.worksheets
+        if _criterion_key(ws.title).casefold() != "guide"
+    ]
+
+    if not sheets:
+        raise ValueError("A planilha de avaliações não possui abas de especialistas.")
+
+    first = sheets[0]
+    header_row = _find_header_row(first, ["ID", "Descrição"])
+    if header_row is None:
+        raise ValueError(
+            f"Não foi possível localizar o cabeçalho de avaliações na aba '{first.title}'."
+        )
+
+    first_cols = _criterion_columns(first, header_row, 3)
+    canonical = list(first_cols.keys())
+    if not canonical:
+        raise ValueError(
+            f"Nenhum critério foi encontrado na aba '{first.title}'."
+        )
+
+    for ws in sheets:
+        row = _find_header_row(ws, ["ID", "Descrição"])
+        if row is None:
+            raise ValueError(
+                f"Não foi possível localizar o cabeçalho de avaliações na aba '{ws.title}'."
+            )
+        _reorder_columns_in_place(ws, row, 3, canonical)
+
+    out = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+    out.close()
+    wb.save(out.name)
+    return Path(out.name)
+
+
+def normalize_fahp_workbook(path, expected_criteria):
+    """
+    Realinha as referências/precisões do FAHP-Express pela identidade do
+    critério. Cada especialista pode ter uma referência diferente; o valor
+    1 continua associado ao critério que o decisor escolheu como referência.
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path, data_only=False)
+    sheets = [
+        ws for ws in wb.worksheets
+        if _criterion_key(ws.title).casefold() != "guide"
+    ]
+
+    if not sheets:
+        raise ValueError("A planilha FAHP-Express não possui abas de especialistas.")
+
+    canonical = [_criterion_key(x) for x in expected_criteria]
+    if not canonical or any(not x for x in canonical):
+        raise ValueError("Não foi possível determinar os critérios da planilha de avaliações.")
+
+    for ws in sheets:
+        header_row = _find_header_row(ws, ["Critérios"])
+        if header_row is None:
+            raise ValueError(
+                f"Não foi possível localizar o cabeçalho FAHP-Express na aba '{ws.title}'."
+            )
+        _reorder_columns_in_place(ws, header_row, 2, canonical)
+
+    out = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
+    out.close()
+    wb.save(out.name)
+    return Path(out.name)
+
+
 def result_df(data, result):
     return pd.DataFrame({
         "Rank": np.asarray(
@@ -743,7 +901,7 @@ with st.sidebar:
         try:
 
             preview = read_expert_workbook(
-                save_uploaded(req_file)
+                normalize_expert_workbook(save_uploaded(req_file))
             )
 
             criteria = preview["criteria"]
@@ -963,7 +1121,10 @@ if run:
             data = preview
 
             fahp = read_fahp_workbook(
-                save_uploaded(fahp_file),
+                normalize_fahp_workbook(
+                    save_uploaded(fahp_file),
+                    data["criteria"],
+                ),
                 n_criteria=len(
                     data["criteria"]
                 ),
