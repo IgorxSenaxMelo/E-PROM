@@ -2143,11 +2143,34 @@ if "result" in st.session_state:
                 n_criteria=data["n_criteria"],
             )
 
-            # Monte Carlo uses the same explicit per-decision-maker precision
-            # matrix as E-PROM: (n_experts, n_criteria). Do not reuse the
-            # legacy reader's collapsed precision array, which may contain
-            # only the first decision maker.
-            mc_precision_levels = fahp["precision_levels"]
+            # IMPORTANT: the E-PROM core and the legacy Monte Carlo module
+            # use different orientations for the precision matrix.
+            #
+            # E-PROM:
+            #     (n_experts, n_criteria) = (2, 8)
+            #
+            # Monte Carlo legacy contract:
+            #     (n_criteria, n_experts) = (8, 2)
+            #
+            # The workbook is read once into the canonical E-PROM orientation
+            # and transposed only at this boundary. The Monte Carlo algorithm
+            # itself remains unchanged.
+            precision_arr = np.asarray(
+                fahp["precision_levels"],
+                dtype=object,
+            )
+            expected_eprom_shape = (
+                data["n_experts"],
+                data["n_criteria"],
+            )
+            if precision_arr.shape != expected_eprom_shape:
+                raise ValueError(
+                    "Internal precision matrix has dimension "
+                    f"{precision_arr.shape}; expected "
+                    f"{expected_eprom_shape} before Monte Carlo."
+                )
+
+            mc_precision_levels = precision_arr.T.tolist()
 
             mc = run_e_prom_monte_carlo(
                 data["evaluations"],
