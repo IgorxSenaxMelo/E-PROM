@@ -1816,6 +1816,31 @@ if run:
                 canonical_criteria=data["criteria"],
             )
 
+            # Rebuild the displayed/group fuzzy weights from all decision
+            # makers. The legacy reader's w_fuzzy_group can contain only the
+            # first expert when multiple FAHP sheets are present. Keep the
+            # computational core unchanged: run_e_prom continues to consume
+            # w_fuzzy_individual below.
+            individual_w = np.asarray(
+                fahp["w_fuzzy_individual"],
+                dtype=float,
+            )
+            expected_w_shape = (
+                data["n_criteria"],
+                4,
+                data["n_experts"],
+            )
+            if individual_w.shape != expected_w_shape:
+                raise ValueError(
+                    "Individual FAHP fuzzy weights have dimension "
+                    f"{individual_w.shape}; expected {expected_w_shape}."
+                )
+
+            fahp["w_fuzzy_group"] = np.mean(
+                individual_w,
+                axis=2,
+            )
+
             # Use the actual workbook tab names (e.g. IGOR, LUMA) throughout
             # the application instead of generic "Decision maker N" labels.
             fahp["expert_names"] = get_fahp_decision_maker_names(
@@ -2108,33 +2133,62 @@ if "result" in st.session_state:
             key="run_mc",
         ):
 
-            # Usa as linhas de referência individuais fornecidas pelos
-            # especialistas no FAHP-Express. Mantém compatibilidade com
-            # versões anteriores do data_loader que não armazenavam
-            # explicitamente `reference_rows`.
+            # Recover the reference comparison vector for each decision
+            # maker. Prefer the explicit field when it has the expected
+            # expert × criterion shape. Older readers may expose it in an
+            # incompatible shape; in that case use the first row of each
+            # A_individual matrix, which is exactly the reference-comparison
+            # vector after normalize_fahp_workbook has placed each expert's
+            # own reference criterion first.
+            expected_ref_shape = (
+                data["n_experts"],
+                data["n_criteria"],
+            )
+            transposed_ref_shape = (
+                data["n_criteria"],
+                data["n_experts"],
+            )
+
+            reference_rows = None
             if "reference_rows" in fahp:
-                reference_rows = np.asarray(
+                candidate_ref = np.asarray(
                     fahp["reference_rows"],
                     dtype=float,
                 )
-            else:
-                # Fallback: A_individual preserva as razões v_j/v_i
-                # usadas para reconstruir o FAHP-Express. Como uma
-                # constante comum não altera as razões, a primeira linha
-                # da matriz pode ser usada como uma representação
-                # equivalente dos valores de referência para o MC.
+                if candidate_ref.shape == expected_ref_shape:
+                    reference_rows = candidate_ref
+                elif candidate_ref.shape == transposed_ref_shape:
+                    reference_rows = candidate_ref.T
+
+            if reference_rows is None:
                 A_individual = fahp.get("A_individual")
                 if A_individual is None:
                     st.error(
                         "Could not recover the FAHP-Express reference inputs "
-                        "from FAHP-Express for CPP/Monte Carlo. Re-run "
-                        "E-PROM with the updated FAHP-Express workbook."
+                        "from FAHP-Express for CPP/Monte Carlo."
                     )
                     st.stop()
 
-                reference_rows = np.asarray(
-                    [np.asarray(A, dtype=float)[0, :] for A in A_individual],
-                    dtype=float,
+                rows = []
+                for A in A_individual:
+                    A_arr = np.asarray(A, dtype=float)
+                    if A_arr.ndim != 2 or A_arr.shape != (
+                        data["n_criteria"],
+                        data["n_criteria"],
+                    ):
+                        raise ValueError(
+                            "Invalid FAHP-Express individual comparison matrix "
+                            f"with dimension {A_arr.shape}; expected "
+                            f"({data['n_criteria']}, {data['n_criteria']})."
+                        )
+                    rows.append(A_arr[0, :])
+
+                reference_rows = np.asarray(rows, dtype=float)
+
+            if reference_rows.shape != expected_ref_shape:
+                raise ValueError(
+                    "FAHP-Express reference rows have dimension "
+                    f"{reference_rows.shape}; expected {expected_ref_shape}."
                 )
 
             fahp = normalize_precision_levels_shape(
@@ -2170,19 +2224,8 @@ if "result" in st.session_state:
                     f"{precision_arr.shape}; expected {expected_shape}."
                 )
 
-            # Keep the reference rows in the same canonical expert × criterion
-            # orientation. If a legacy reader returned criterion × expert,
-            # normalize it before the MC call.
-            ref_arr = np.asarray(reference_rows, dtype=float)
-            if ref_arr.shape == expected_shape:
-                reference_candidates = [ref_arr]
-            elif ref_arr.shape == transposed_shape:
-                reference_candidates = [ref_arr.T]
-            else:
-                raise ValueError(
-                    "FAHP-Express reference rows have dimension "
-                    f"{ref_arr.shape}; expected {expected_shape}."
-                )
+            # reference_rows is now guaranteed to be expert × criterion.
+            reference_candidates = [reference_rows]
 
             # Try the canonical E-PROM orientation first. If the installed
             # Monte Carlo module still follows the older transposed contract,
