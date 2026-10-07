@@ -633,6 +633,29 @@ def normalize_precision_levels_shape(fahp, n_experts, n_criteria):
     return fahp
 
 
+def get_fahp_decision_maker_names(path, n_experts):
+    """Return actual FAHP decision-maker sheet names in workbook order."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path, read_only=True, data_only=True)
+    names = [
+        ws.title
+        for ws in wb.worksheets
+        if _criterion_key(ws.title).casefold() not in {
+            "guide", "_lists", "instructions", "instruções",
+            "orientações",
+        }
+    ]
+
+    if len(names) != n_experts:
+        raise ValueError(
+            "The FAHP-Express workbook contains "
+            f"{len(names)} decision-maker sheets; expected {n_experts}."
+        )
+
+    return names
+
+
 def rebuild_individual_fahp_weights(fahp_path, n_criteria, n_experts):
     """
     Rebuild the individual fuzzy-weight tensor without modifying the core.
@@ -1746,6 +1769,13 @@ if run:
                 ),
             )
 
+            # Keep the precision representation originally produced by the
+            # legacy FAHP reader for the legacy Monte Carlo module. The E-PROM
+            # core below uses the explicit per-decision-maker (DM x criteria)
+            # matrix, while Monte Carlo historically consumed the reader's
+            # original representation.
+            mc_precision_levels = fahp.get("precision_levels")
+
             # Read precision directly from all decision-maker sheets.
             # This prevents an older generic reader from collapsing
             # multiple precision rows into a single (1 x N) row.
@@ -1772,6 +1802,13 @@ if run:
                 fahp_path,
                 n_criteria=data["n_criteria"],
                 n_experts=data["n_experts"],
+            )
+
+            # Use the actual workbook tab names (e.g. IGOR, LUMA) throughout
+            # the application instead of generic "Decision maker N" labels.
+            fahp["expert_names"] = get_fahp_decision_maker_names(
+                fahp_path,
+                data["n_experts"],
             )
 
             result = run_e_prom(
@@ -2106,7 +2143,7 @@ if "result" in st.session_state:
                 variation,
                 n_mc=int(n_mc),
                 seed=int(seed),
-                precision_levels=fahp.get("precision_levels"),
+                precision_levels=mc_precision_levels,
             )
 
             st.session_state["mc"] = mc
