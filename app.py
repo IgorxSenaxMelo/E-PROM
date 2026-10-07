@@ -506,6 +506,38 @@ def relation_matrix(result):
     return rel
 
 
+def alternative_labels(data):
+    """Retorna os nomes das alternativas para exibição nos gráficos.
+
+    Os cálculos continuam usando os IDs internamente. Quando houver uma
+    descrição válida, ela é usada apenas como rótulo visual.
+    """
+    ids = [str(x) for x in data["ids"]]
+    descriptions = data.get("descriptions", [])
+
+    if descriptions is None or len(descriptions) != len(ids):
+        return ids
+
+    labels = []
+    used = {}
+
+    for alt_id, desc in zip(ids, descriptions):
+        label = str(desc).strip() if desc is not None else ""
+        if not label:
+            label = alt_id
+
+        # Evita rótulos visualmente indistinguíveis quando duas
+        # alternativas possuem a mesma descrição.
+        count = used.get(label, 0) + 1
+        used[label] = count
+        if count > 1:
+            label = f"{label} ({alt_id})"
+
+        labels.append(label)
+
+    return labels
+
+
 def plot_relation(data, result):
     rel = relation_matrix(result)
 
@@ -520,10 +552,7 @@ def plot_relation(data, result):
         mapping.get
     )(rel)
 
-    labels = [
-        str(x)
-        for x in data["ids"]
-    ]
+    labels = alternative_labels(data)
 
     fig = go.Figure(
         go.Heatmap(
@@ -554,17 +583,15 @@ def plot_relation(data, result):
 
     fig.update_layout(
         title="PROMETHEE I — relações",
-        height=750,
+        height=max(750, len(labels) * 110),
+        margin=dict(l=180, r=80, t=80, b=120),
     )
 
     return fig
 
 
 def plot_rank_heatmap(data, result):
-    labels = [
-        str(x)
-        for x in data["ids"]
-    ]
+    labels = alternative_labels(data)
 
     df = pd.DataFrame(
         result["rank_experts"],
@@ -600,7 +627,8 @@ def plot_rank_heatmap(data, result):
 
     fig.update_layout(
         title="Posições por especialista e E-PROM",
-        height=max(600, len(labels) * 30),
+        height=max(600, len(labels) * 55),
+        margin=dict(l=180, r=80, t=80, b=100),
     )
 
     return fig
@@ -608,7 +636,7 @@ def plot_rank_heatmap(data, result):
 
 
 def plot_mc_rank_acceptability(data, mc):
-    labels = [str(x) for x in data["ids"]]
+    labels = alternative_labels(data)
     order = np.argsort(mc["mean_rank"])
     M = mc["rank_acceptability"][order, :]
 
@@ -629,13 +657,14 @@ def plot_mc_rank_acceptability(data, mc):
         title="CPP/Monte Carlo — aceitabilidade das posições",
         xaxis_title="Posição",
         yaxis_title="Alternativa",
-        height=max(550, len(labels) * 30),
+        height=max(550, len(labels) * 55),
+        margin=dict(l=180, r=80, t=80, b=100),
     )
     return fig
 
 
 def plot_mc_outworking(data, mc):
-    labels = [str(x) for x in data["ids"]]
+    labels = alternative_labels(data)
     order = np.argsort(-mc["outranking_acceptability"].sum(axis=1))
     M = mc["outranking_acceptability"][np.ix_(order, order)]
 
@@ -654,7 +683,8 @@ def plot_mc_outworking(data, mc):
         title="CPP/Monte Carlo — aceitabilidade de sobreclassificação",
         xaxis_title="Alternativa sobreclassificada",
         yaxis_title="Alternativa que sobreclassifica",
-        height=700,
+        height=max(700, len(labels) * 55),
+        margin=dict(l=180, r=120, t=100, b=180),
     )
     return fig
 
