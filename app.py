@@ -458,6 +458,23 @@ def normalize_fahp_workbook(path, expected_criteria):
                     target_col,
                 ).value = value
 
+    # The legacy computational core expects every sheet in the temporary
+    # FAHP workbook to be a decision-maker sheet.  The user-facing workbook
+    # may contain Guide and hidden helper sheets, so remove those sheets only
+    # from this temporary computational copy. The uploaded workbook itself is
+    # never modified, and the core remains unchanged.
+    removable = [
+        ws for ws in wb.worksheets
+        if _criterion_key(ws.title).casefold() in {"guide", "_lists"}
+    ]
+    for ws in removable:
+        wb.remove(ws)
+
+    if not wb.worksheets:
+        raise ValueError(
+            "The FAHP-Express workbook contains no decision-maker sheets."
+        )
+
     out = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
     out.close()
     wb.save(out.name)
