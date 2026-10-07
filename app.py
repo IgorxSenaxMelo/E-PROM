@@ -483,6 +483,141 @@ def normalize_fahp_workbook(path, expected_criteria):
 
 
 
+
+def read_mc_reference_rows_from_workbook(path, criteria, n_experts):
+    """
+    Recover the FAHP-Express reference vectors directly from the normalized
+    workbook, preserving each decision maker's own reference criterion.
+
+    Output contract for Monte Carlo:
+        (n_experts, n_criteria)
+
+    The values are returned in the canonical criterion order, even though
+    each normalized sheet stores its own reference criterion in column B.
+    """
+    from openpyxl import load_workbook
+    import unicodedata
+    import re
+
+    def key(value):
+        text = _criterion_key(value).casefold()
+        text = unicodedata.normalize("NFKD", text)
+        text = "".join(
+            ch for ch in text
+            if not unicodedata.combining(ch)
+        )
+        text = re.sub(r"[-–—_/]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if text in {"custo", "custo beneficio"}:
+            return "custo-beneficio"
+        return text
+
+    def numeric(value):
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            return float(value)
+        if value is None:
+            raise ValueError("Empty FAHP-Express reference value.")
+        text = str(value).strip()
+        lookup = {
+            k: float(v)
+            for k, v in LINGUISTIC_SCALE.items()
+        }
+        normalized = " ".join(text.casefold().split())
+        if normalized in lookup:
+            return lookup[normalized]
+        try:
+            return float(text.replace(",", "."))
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid FAHP-Express reference value '{value}'."
+            ) from exc
+
+    wb = load_workbook(path, data_only=True)
+    sheets = [
+        ws for ws in wb.worksheets
+        if key(ws.title) not in {
+            "guide", "_lists", "instructions", "instrucoes",
+            "orientacoes",
+        }
+    ]
+
+    if len(sheets) != n_experts:
+        raise ValueError(
+            "FAHP-Express workbook contains "
+            f"{len(sheets)} decision-maker sheets; expected {n_experts}."
+        )
+
+    canonical = [_criterion_key(c) for c in criteria]
+    canonical_keys = [key(c) for c in canonical]
+    rows = []
+
+    for ws in sheets:
+        header_row = _find_fahp_header_row(ws)
+        if header_row is None:
+            raise ValueError(
+                f"Could not locate the FAHP-Express criteria header "
+                f"in sheet '{ws.title}'."
+            )
+
+        col_by_key = {}
+        for c in range(2, ws.max_column + 1):
+            ck = key(ws.cell(header_row, c).value)
+            if ck:
+                col_by_key[ck] = c
+
+        # Locate the comparison-with-reference row.
+        comparison_row = None
+        for r in range(header_row + 1, min(ws.max_row, header_row + 8) + 1):
+            first = ws.cell(r, 1).value
+            if isinstance(first, str) and key(first) in {
+                "comparison with reference",
+                "comparacao com referencia",
+            }:
+                comparison_row = r
+                break
+
+        if comparison_row is None:
+            raise ValueError(
+                f"Could not find 'Comparison with reference' "
+                f"in FAHP sheet '{ws.title}'."
+            )
+
+        # Each normalized sheet has its own reference in the first criterion
+        # column (column B). This is the decisive reference criterion.
+        reference_key = key(ws.cell(header_row, 2).value)
+
+        if reference_key not in col_by_key:
+            raise ValueError(
+                f"Reference criterion could not be recovered from "
+                f"FAHP sheet '{ws.title}'."
+            )
+
+        # Read by criterion identity, not by physical column position.
+        row_by_key = {}
+        for ck, col in col_by_key.items():
+            row_by_key[ck] = numeric(ws.cell(comparison_row, col).value)
+
+        missing = [c for c, ck in zip(canonical, canonical_keys)
+                   if ck not in row_by_key]
+        if missing:
+            raise ValueError(
+                f"FAHP sheet '{ws.title}' is missing reference values for: "
+                + ", ".join(missing)
+            )
+
+        rows.append([row_by_key[ck] for ck in canonical_keys])
+
+    arr = np.asarray(rows, dtype=float)
+    expected = (n_experts, len(criteria))
+    if arr.shape != expected:
+        raise ValueError(
+            "FAHP-Express reference rows have dimension "
+            f"{arr.shape}; expected {expected}."
+        )
+
+    return arr
+
+
 def read_precision_levels_from_workbook(path, criteria, n_experts):
     """
     Read Attribute precision directly from every decision-maker sheet.
@@ -2133,63 +2268,14 @@ if "result" in st.session_state:
             key="run_mc",
         ):
 
-            # Recover the reference comparison vector for each decision
-            # maker. Prefer the explicit field when it has the expected
-            # expert × criterion shape. Older readers may expose it in an
-            # incompatible shape; in that case use the first row of each
-            # A_individual matrix, which is exactly the reference-comparison
-            # vector after normalize_fahp_workbook has placed each expert's
-            # own reference criterion first.
-            expected_ref_shape = (
-                data["n_experts"],
-                data["n_criteria"],
-            )
-            transposed_ref_shape = (
-                data["n_criteria"],
+            # Recover each decision maker's own FAHP-Express reference
+            # directly from the normalized workbook, then map it back to the
+            # canonical criterion order required by Monte Carlo.
+            reference_rows = read_mc_reference_rows_from_workbook(
+                fahp_path,
+                data["criteria"],
                 data["n_experts"],
             )
-
-            reference_rows = None
-            if "reference_rows" in fahp:
-                candidate_ref = np.asarray(
-                    fahp["reference_rows"],
-                    dtype=float,
-                )
-                if candidate_ref.shape == expected_ref_shape:
-                    reference_rows = candidate_ref
-                elif candidate_ref.shape == transposed_ref_shape:
-                    reference_rows = candidate_ref.T
-
-            if reference_rows is None:
-                A_individual = fahp.get("A_individual")
-                if A_individual is None:
-                    st.error(
-                        "Could not recover the FAHP-Express reference inputs "
-                        "from FAHP-Express for CPP/Monte Carlo."
-                    )
-                    st.stop()
-
-                rows = []
-                for A in A_individual:
-                    A_arr = np.asarray(A, dtype=float)
-                    if A_arr.ndim != 2 or A_arr.shape != (
-                        data["n_criteria"],
-                        data["n_criteria"],
-                    ):
-                        raise ValueError(
-                            "Invalid FAHP-Express individual comparison matrix "
-                            f"with dimension {A_arr.shape}; expected "
-                            f"({data['n_criteria']}, {data['n_criteria']})."
-                        )
-                    rows.append(A_arr[0, :])
-
-                reference_rows = np.asarray(rows, dtype=float)
-
-            if reference_rows.shape != expected_ref_shape:
-                raise ValueError(
-                    "FAHP-Express reference rows have dimension "
-                    f"{reference_rows.shape}; expected {expected_ref_shape}."
-                )
 
             fahp = normalize_precision_levels_shape(
                 fahp,
@@ -2224,20 +2310,16 @@ if "result" in st.session_state:
                     f"{precision_arr.shape}; expected {expected_shape}."
                 )
 
-            # reference_rows is now guaranteed to be expert × criterion.
-            reference_candidates = [reference_rows]
-
-            # Try the canonical E-PROM orientation first. If the installed
-            # Monte Carlo module still follows the older transposed contract,
-            # retry with the transpose. This keeps the Monte Carlo core
-            # untouched while making the application compatible with both
-            # versions.
+            # The legacy Monte Carlo core expects precision levels in
+            # criterion × decision-maker orientation, while reference_rows
+            # remains decision-maker × criterion. This is the contract used by
+            # the previously working v20 integration.
             mc = None
             mc_errors = []
 
             for candidate_precision in (
-                precision_arr,
                 precision_arr.T,
+                precision_arr,
             ):
                 try:
                     mc = run_e_prom_monte_carlo(
