@@ -631,6 +631,97 @@ def normalize_precision_levels_shape(fahp, n_experts, n_criteria):
     fahp["precision_levels"] = arr.tolist()
     return fahp
 
+
+def rebuild_individual_fahp_weights(fahp_path, n_criteria, n_experts):
+    """
+    Rebuild the individual fuzzy-weight tensor without modifying the core.
+
+    The legacy reader can expose only the first decision maker in
+    `w_fuzzy_individual` when several expert sheets are present. We therefore
+    invoke the unchanged reader once per decision-maker sheet and stack the
+    resulting fuzzy vectors along the expert axis.
+
+    Expected core contract:
+        (criteria, trapezoid_parameters, decision_makers)
+        = (n_criteria, 4, n_experts)
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(fahp_path, data_only=False)
+
+    decision_sheets = [
+        ws.title
+        for ws in wb.worksheets
+        if _criterion_key(ws.title).casefold() not in {"guide", "_lists"}
+    ]
+
+    if len(decision_sheets) != n_experts:
+        raise ValueError(
+            "The FAHP-Express workbook contains "
+            f"{len(decision_sheets)} decision-maker sheets; "
+            f"expected {n_experts}."
+        )
+
+    individual = []
+
+    for sheet_name in decision_sheets:
+        # Build a temporary workbook containing exactly one decision-maker.
+        single = load_workbook(fahp_path, data_only=False)
+
+        for ws in list(single.worksheets):
+            if ws.title != sheet_name:
+                single.remove(ws)
+
+        tmp = tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=".xlsx",
+        )
+        tmp.close()
+
+        try:
+            single.save(tmp.name)
+
+            one = read_fahp_workbook(
+                Path(tmp.name),
+                n_criteria=n_criteria,
+            )
+
+            wf = np.asarray(
+                one["w_fuzzy_individual"],
+                dtype=float,
+            )
+
+            # A one-expert workbook must produce (criteria, 4, 1).
+            if wf.ndim == 2 and wf.shape == (n_criteria, 4):
+                wf = wf[:, :, np.newaxis]
+
+            if wf.shape != (n_criteria, 4, 1):
+                raise ValueError(
+                    f"FAHP sheet '{sheet_name}' produced fuzzy weights with "
+                    f"dimension {wf.shape}; expected "
+                    f"({n_criteria}, 4, 1)."
+                )
+
+            individual.append(wf[:, :, 0])
+
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
+    stacked = np.stack(individual, axis=2)
+
+    if stacked.shape != (n_criteria, 4, n_experts):
+        raise ValueError(
+            "The reconstructed individual FAHP weights have dimension "
+            f"{stacked.shape}; expected "
+            f"({n_criteria}, 4, {n_experts})."
+        )
+
+    return stacked
+
+
 def result_df(data, result):
     return pd.DataFrame({
         "Rank": np.asarray(
@@ -1637,6 +1728,16 @@ if run:
                 fahp,
                 n_experts=data["n_experts"],
                 n_criteria=data["n_criteria"],
+            )
+
+            # The legacy reader may collapse w_fuzzy_individual to the first
+            # expert when multiple FAHP sheets are present. Rebuild only this
+            # input tensor by invoking the same unchanged reader once per
+            # decision-maker sheet.
+            fahp["w_fuzzy_individual"] = rebuild_individual_fahp_weights(
+                fahp_path,
+                n_criteria=data["n_criteria"],
+                n_experts=data["n_experts"],
             )
 
             result = run_e_prom(
