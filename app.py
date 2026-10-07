@@ -36,6 +36,31 @@ PREF_CODES = {
     "Linear": 5,
 }
 
+# Spreadsheet input vocabulary. These are translated to the numeric values
+# expected by the existing FAHP-Express core; the core itself is unchanged.
+LINGUISTIC_SCALE = {
+    "equal importance": 1,
+    "weakly more important": 2,
+    "moderately more important": 3,
+    "moderately to strongly more important": 4,
+    "strongly more important": 5,
+    "strongly to very strongly more important": 6,
+    "very strongly more important": 7,
+    "very strongly to extremely more important": 8,
+    "extremely more important": 9,
+}
+
+PRECISION_SCALE = {
+    "high": "Alta",
+    "medium": "Média",
+    "low": "Baixa",
+    # Backward compatibility with Portuguese workbooks.
+    "alta": "Alta",
+    "média": "Média",
+    "media": "Média",
+    "baixa": "Baixa",
+}
+
 
 def save_uploaded(f):
     tmp = tempfile.NamedTemporaryFile(
@@ -154,6 +179,47 @@ def _reorder_columns_in_place(ws, header_row, first_criterion_col, canonical):
             ws.cell(header_row + offset, target_col).value = value
 
 
+def translate_fahp_inputs(ws, header_row, col_map):
+    # Find the two semantic rows by their labels, independently of
+    # criterion order.
+    comparison_row = None
+    precision_row = None
+
+    for r in range(header_row, ws.max_row + 1):
+        label = ws.cell(r, 1).value
+        if label is None:
+            continue
+        key = str(label).strip().casefold()
+        if key == "comparação com referência" or key == "comparison with reference":
+            comparison_row = r
+        elif key == "precisão do atributo" or key == "attribute precision":
+            precision_row = r
+
+    if comparison_row is not None:
+        for col in col_map.values():
+            value = ws.cell(comparison_row, col).value
+            if isinstance(value, str):
+                key = " ".join(value.strip().casefold().split())
+                if key in LINGUISTIC_SCALE:
+                    ws.cell(comparison_row, col).value = LINGUISTIC_SCALE[key]
+                elif key:
+                    # Preserve numeric strings for backward compatibility.
+                    try:
+                        number = float(value.replace(",", "."))
+                        if number.is_integer():
+                            number = int(number)
+                        ws.cell(comparison_row, col).value = number
+                    except ValueError:
+                        pass
+
+    if precision_row is not None:
+        for col in col_map.values():
+            value = ws.cell(precision_row, col).value
+            if isinstance(value, str):
+                key = " ".join(value.strip().casefold().split())
+                if key in PRECISION_SCALE:
+                    ws.cell(precision_row, col).value = PRECISION_SCALE[key]
+
 def normalize_expert_workbook(path):
     """
     Aceita especialistas com os mesmos critérios em ordens diferentes.
@@ -188,51 +254,12 @@ def normalize_expert_workbook(path):
         "baixa": "Baixa",
     }
 
-    def translate_fahp_inputs(ws, header_row, col_map):
-        # Find the two semantic rows by their labels, independently of
-        # criterion order.
-        comparison_row = None
-        precision_row = None
 
-        for r in range(header_row, ws.max_row + 1):
-            label = ws.cell(r, 1).value
-            if label is None:
-                continue
-            key = str(label).strip().casefold()
-            if key == "comparação com referência" or key == "comparison with reference":
-                comparison_row = r
-            elif key == "precisão do atributo" or key == "attribute precision":
-                precision_row = r
-
-        if comparison_row is not None:
-            for col in col_map.values():
-                value = ws.cell(comparison_row, col).value
-                if isinstance(value, str):
-                    key = " ".join(value.strip().casefold().split())
-                    if key in linguistic_scale:
-                        ws.cell(comparison_row, col).value = linguistic_scale[key]
-                    elif key:
-                        # Preserve numeric strings for backward compatibility.
-                        try:
-                            number = float(value.replace(",", "."))
-                            if number.is_integer():
-                                number = int(number)
-                            ws.cell(comparison_row, col).value = number
-                        except ValueError:
-                            pass
-
-        if precision_row is not None:
-            for col in col_map.values():
-                value = ws.cell(precision_row, col).value
-                if isinstance(value, str):
-                    key = " ".join(value.strip().casefold().split())
-                    if key in precision_scale:
-                        ws.cell(precision_row, col).value = precision_scale[key]
 
     wb = load_workbook(path, data_only=False)
     sheets = [
         ws for ws in wb.worksheets
-        if _criterion_key(ws.title).casefold() != "guide"
+        if _criterion_key(ws.title).casefold() not in {"guide", "_lists"}
     ]
 
     if not sheets:
@@ -306,7 +333,7 @@ def normalize_fahp_workbook(path, expected_criteria):
     wb = load_workbook(path, data_only=False)
     sheets = [
         ws for ws in wb.worksheets
-        if _criterion_key(ws.title).casefold() != "guide"
+        if _criterion_key(ws.title).casefold() not in {"guide", "_lists"}
     ]
 
     if not sheets:
@@ -449,7 +476,7 @@ def result_df(data, result):
         "Phi-": result["phi_minus"],
         "Net Phi": result["phi_net"],
     }).sort_values(
-        ["Rank", "Alternativa"]
+        ["Rank", "Alternative"]
     ).reset_index(drop=True)
 
 
@@ -475,7 +502,7 @@ def excel_bytes(data, result, config, fahp):
             index=data["ids"],
             columns=result["expert_names"],
         )
-        phi.index.name = "Alternativa"
+        phi.index.name = "Alternative"
 
         phi.to_excel(
             writer,
@@ -1605,7 +1632,7 @@ if "result" in st.session_state:
             columns=result["expert_names"],
         )
 
-        phi_df.index.name = "Alternativa"
+        phi_df.index.name = "Alternative"
 
         st.subheader(
             "Net Phi by decision maker"
