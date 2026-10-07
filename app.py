@@ -2020,6 +2020,7 @@ if run:
         st.session_state.update(
             data=data,
             fahp=fahp,
+            fahp_path=fahp_path,
             result=result,
             config=config,
             ranking=ranking,
@@ -2043,6 +2044,7 @@ if "result" in st.session_state:
 
     data = st.session_state["data"]
     fahp = st.session_state["fahp"]
+    fahp_path = st.session_state.get("fahp_path")
     result = st.session_state["result"]
     config = st.session_state["config"]
     ranking = st.session_state["ranking"]
@@ -2271,6 +2273,13 @@ if "result" in st.session_state:
             # Recover each decision maker's own FAHP-Express reference
             # directly from the normalized workbook, then map it back to the
             # canonical criterion order required by Monte Carlo.
+            if not fahp_path or not Path(fahp_path).exists():
+                raise ValueError(
+                    "The normalized FAHP-Express workbook is no longer "
+                    "available for Monte Carlo. Please re-run E-PROM with "
+                    "the FAHP-Express workbook loaded."
+                )
+
             reference_rows = read_mc_reference_rows_from_workbook(
                 fahp_path,
                 data["criteria"],
