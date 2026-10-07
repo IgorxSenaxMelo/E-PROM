@@ -2,6 +2,7 @@ from pathlib import Path
 import io
 import sys
 import tempfile
+import os
 
 import numpy as np
 import pandas as pd
@@ -636,10 +637,9 @@ def rebuild_individual_fahp_weights(fahp_path, n_criteria, n_experts):
     """
     Rebuild the individual fuzzy-weight tensor without modifying the core.
 
-    The legacy reader can expose only the first decision maker in
-    `w_fuzzy_individual` when several expert sheets are present. We therefore
-    invoke the unchanged reader once per decision-maker sheet and stack the
-    resulting fuzzy vectors along the expert axis.
+    The legacy reader expects a workbook with decision-maker sheets plus its
+    final support/instructions sheet. Therefore each one-expert temporary
+    workbook retains the support sheet while exposing exactly one expert.
 
     Expected core contract:
         (criteria, trapezoid_parameters, decision_makers)
@@ -655,6 +655,8 @@ def rebuild_individual_fahp_weights(fahp_path, n_criteria, n_experts):
         if _criterion_key(ws.title).casefold() not in {"guide", "_lists"}
     ]
 
+    # normalize_fahp_workbook removes Guide from the computational copy.
+    # Reconstruct the support sheet from the original template when needed.
     if len(decision_sheets) != n_experts:
         raise ValueError(
             "The FAHP-Express workbook contains "
@@ -662,20 +664,37 @@ def rebuild_individual_fahp_weights(fahp_path, n_criteria, n_experts):
             f"expected {n_experts}."
         )
 
+    # Locate a support/instructions sheet if the normalized workbook retained
+    # one. If not, create a minimal structurally valid support sheet. The
+    # support sheet is consumed only by the legacy reader and never by the
+    # mathematical core.
+    support_name = None
+    for ws in wb.worksheets:
+        if _criterion_key(ws.title).casefold() in {
+            "guide", "instructions", "instruções", "orientações"
+        }:
+            support_name = ws.title
+            break
+
     individual = []
 
     for sheet_name in decision_sheets:
-        # Build a temporary workbook containing exactly one decision-maker.
         single = load_workbook(fahp_path, data_only=False)
 
+        # Keep exactly one decision-maker sheet.
         for ws in list(single.worksheets):
             if ws.title != sheet_name:
                 single.remove(ws)
 
-        tmp = tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=".xlsx",
-        )
+        # The legacy loader requires a final support/instructions sheet.
+        if support_name is not None and support_name in single.sheetnames:
+            pass
+        else:
+            support = single.create_sheet("_Guide")
+            support["A1"] = "Guide"
+            support["A2"] = "FAHP-Express workbook support sheet."
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
         tmp.close()
 
         try:
@@ -686,12 +705,8 @@ def rebuild_individual_fahp_weights(fahp_path, n_criteria, n_experts):
                 n_criteria=n_criteria,
             )
 
-            wf = np.asarray(
-                one["w_fuzzy_individual"],
-                dtype=float,
-            )
+            wf = np.asarray(one["w_fuzzy_individual"], dtype=float)
 
-            # A one-expert workbook must produce (criteria, 4, 1).
             if wf.ndim == 2 and wf.shape == (n_criteria, 4):
                 wf = wf[:, :, np.newaxis]
 
