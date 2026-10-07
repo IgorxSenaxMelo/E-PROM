@@ -1785,18 +1785,9 @@ if run:
                 ),
             )
 
-            # Keep the precision representation originally produced by the
-            # legacy FAHP reader for the legacy Monte Carlo module. The E-PROM
-            # core below uses the explicit per-decision-maker (DM x criteria)
-            # matrix, while Monte Carlo historically consumed the reader's
-            # original representation.
-            mc_precision_levels = fahp.get("precision_levels")
-
-            # Preserve the legacy MC precision representation across Streamlit
-            # reruns; the E-PROM precision matrix is normalized separately.
-            st.session_state["mc_precision_levels"] = mc_precision_levels
-
-            # Read precision directly from all decision-maker sheets.
+            # Read precision directly from every decision-maker sheet.
+            # This produces the explicit (decision maker, criterion) matrix
+            # required by both E-PROM and Monte Carlo.
             # This prevents an older generic reader from collapsing
             # multiple precision rows into a single (1 x N) row.
             fahp["precision_levels"] = read_precision_levels_from_workbook(
@@ -2152,10 +2143,11 @@ if "result" in st.session_state:
                 n_criteria=data["n_criteria"],
             )
 
-            mc_precision_levels = st.session_state.get(
-                "mc_precision_levels",
-                fahp.get("precision_levels"),
-            )
+            # Monte Carlo uses the same explicit per-decision-maker precision
+            # matrix as E-PROM: (n_experts, n_criteria). Do not reuse the
+            # legacy reader's collapsed precision array, which may contain
+            # only the first decision maker.
+            mc_precision_levels = fahp["precision_levels"]
 
             mc = run_e_prom_monte_carlo(
                 data["evaluations"],
