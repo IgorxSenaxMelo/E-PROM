@@ -67,6 +67,35 @@ def _find_header_row(ws, required_headers, max_scan_rows=20):
     return None
 
 
+def _find_fahp_header_row(ws, max_scan_rows=30):
+    """Locate the FAHP criterion header without relying on sheet-title text.
+
+    The standard English template uses:
+        Criteria | criterion 1 | criterion 2 | ...
+
+    Legacy Portuguese workbooks use:
+        Critérios | critério 1 | critério 2 | ...
+
+    This helper deliberately checks the actual header row and does not infer
+    the header from A1, sheet name, or the order of criteria.
+    """
+    for r in range(1, min(ws.max_row, max_scan_rows) + 1):
+        first = _criterion_key(ws.cell(r, 1).value).casefold()
+        if first not in {"criteria", "critérios"}:
+            continue
+
+        # Require at least two criterion names to avoid accepting a title row.
+        nonempty = 0
+        for c in range(2, ws.max_column + 1):
+            if _criterion_key(ws.cell(r, c).value):
+                nonempty += 1
+
+        if nonempty >= 2:
+            return r
+
+    return None
+
+
 def _criterion_columns(ws, header_row, first_criterion_col):
     """Retorna {nome_do_criterio: coluna} a partir do cabeçalho."""
     result = {}
@@ -304,11 +333,15 @@ def normalize_fahp_workbook(path, expected_criteria):
     canonical_keys = [match_key(name) for name in canonical]
 
     for ws in sheets:
-        header_row = _find_header_row(ws, ["Critérios", "Criteria"])
+        # The standard template places the criterion header on the row
+        # whose first cell is "Criteria" (English) or "Critérios" (legacy).
+        # Do not depend on the title text in A1; it is only a sheet title.
+        header_row = _find_fahp_header_row(ws)
         if header_row is None:
             raise ValueError(
-                f"Não foi possível localizar o cabeçalho FAHP-Express "
-                f"na aba '{ws.title}'."
+                f"Could not locate the FAHP-Express criteria header "
+                f"in sheet '{ws.title}'. Expected a row beginning with "
+                f"'Criteria' or 'Critérios'."
             )
 
         # Normalize English workbook labels back to the legacy labels expected
