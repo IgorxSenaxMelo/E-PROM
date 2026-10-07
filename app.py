@@ -2286,6 +2286,12 @@ if "result" in st.session_state:
                 data["n_experts"],
             )
 
+            # Keep the compatibility interface used below: the Monte Carlo
+            # boundary receives a list of candidate reference matrices.
+            # There is only one valid reference matrix here because it was
+            # reconstructed explicitly for every decision maker.
+            reference_candidates = [reference_rows]
+
             fahp = normalize_precision_levels_shape(
                 fahp,
                 n_experts=data["n_experts"],
