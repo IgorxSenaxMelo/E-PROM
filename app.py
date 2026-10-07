@@ -172,11 +172,40 @@ def normalize_expert_workbook(path):
 
 def normalize_fahp_workbook(path, expected_criteria):
     """
-    Realinha as referências/precisões do FAHP-Express pela identidade do
-    critério. Cada especialista pode ter uma referência diferente; o valor
-    1 continua associado ao critério que o decisor escolheu como referência.
+    Normaliza a planilha FAHP-Express pela identidade dos critérios, mas
+    preserva uma referência específica para cada decisor.
+
+    A referência de cada aba é o primeiro critério originalmente apresentado
+    naquela aba, conforme a convenção utilizada pelo data_loader_v73.py.
+    Portanto, decisores diferentes podem escolher referências diferentes.
+
+    A ordem final entregue ao data_loader é:
+        [referência do decisor] + [demais critérios na ordem canônica]
+
+    Os valores de "Comparação com referência" e "Precisão do atributo"
+    permanecem associados ao respectivo critério.
     """
     from openpyxl import load_workbook
+    import unicodedata
+    import re
+
+    def match_key(value):
+        """Chave de comparação tolerante a maiúsculas, acentos e separadores."""
+        text = _criterion_key(value).casefold()
+        text = unicodedata.normalize("NFKD", text)
+        text = "".join(
+            ch for ch in text
+            if not unicodedata.combining(ch)
+        )
+        text = re.sub(r"[-–—_/]+", " ", text)
+        text = re.sub(r"\\s+", " ", text).strip()
+
+        # Compatibilidade com a nomenclatura usada na planilha FAHP antiga:
+        # "CUSTO" corresponde a "Custo-benefício".
+        if text in {"custo", "custo beneficio"}:
+            return "custo-beneficio"
+
+        return text
 
     wb = load_workbook(path, data_only=False)
     sheets = [
@@ -185,19 +214,103 @@ def normalize_fahp_workbook(path, expected_criteria):
     ]
 
     if not sheets:
-        raise ValueError("A planilha FAHP-Express não possui abas de especialistas.")
+        raise ValueError(
+            "A planilha FAHP-Express não possui abas de especialistas."
+        )
 
     canonical = [_criterion_key(x) for x in expected_criteria]
     if not canonical or any(not x for x in canonical):
-        raise ValueError("Não foi possível determinar os critérios da planilha de avaliações.")
+        raise ValueError(
+            "Não foi possível determinar os critérios da planilha de avaliações."
+        )
+
+    canonical_by_key = {}
+    for name in canonical:
+        key = match_key(name)
+        if key in canonical_by_key:
+            raise ValueError(
+                f"Critérios ambíguos na planilha de avaliações: "
+                f"'{canonical_by_key[key]}' e '{name}'."
+            )
+        canonical_by_key[key] = name
+
+    canonical_keys = [match_key(name) for name in canonical]
 
     for ws in sheets:
         header_row = _find_header_row(ws, ["Critérios"])
         if header_row is None:
             raise ValueError(
-                f"Não foi possível localizar o cabeçalho FAHP-Express na aba '{ws.title}'."
+                f"Não foi possível localizar o cabeçalho FAHP-Express "
+                f"na aba '{ws.title}'."
             )
-        _reorder_columns_in_place(ws, header_row, 2, canonical)
+
+        col_map = _criterion_columns(ws, header_row, 2)
+        current_names = list(col_map.keys())
+        current_keys = [match_key(x) for x in current_names]
+
+        if len(current_keys) != len(set(current_keys)):
+            raise ValueError(
+                f"Aba FAHP '{ws.title}' possui critérios duplicados."
+            )
+
+        current_by_key = {
+            key: name
+            for key, name in zip(current_keys, current_names)
+        }
+
+        missing = [
+            canonical_by_key[key]
+            for key in canonical_keys
+            if key not in current_by_key
+        ]
+        extra = [
+            current_by_key[key]
+            for key in current_keys
+            if key not in canonical_by_key
+        ]
+
+        if missing or extra:
+            details = []
+            if missing:
+                details.append("ausentes: " + ", ".join(missing))
+            if extra:
+                details.append("extras: " + ", ".join(extra))
+            raise ValueError(
+                f"Aba FAHP '{ws.title}' possui critérios diferentes "
+                f"({'; '.join(details)})."
+            )
+
+        # A referência é individual de cada decisor: é o primeiro critério
+        # que estava na aba original. Não usamos a referência da primeira aba.
+        reference_key = current_keys[0]
+
+        # O data_loader exige a referência na primeira coluna.
+        target_keys = [reference_key] + [
+            key for key in canonical_keys
+            if key != reference_key
+        ]
+
+        if current_keys == target_keys:
+            continue
+
+        # Captura os valores por identidade do critério antes de escrever.
+        snapshots = {
+            key: [
+                ws.cell(r, col_map[current_by_key[key]]).value
+                for r in range(header_row, ws.max_row + 1)
+            ]
+            for key in current_keys
+        }
+
+        target_cols = sorted(col_map.values())
+
+        for target_col, key in zip(target_cols, target_keys):
+            values = snapshots[key]
+            for offset, value in enumerate(values):
+                ws.cell(
+                    header_row + offset,
+                    target_col,
+                ).value = value
 
     out = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
     out.close()
