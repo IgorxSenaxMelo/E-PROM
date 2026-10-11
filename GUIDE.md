@@ -7,7 +7,7 @@ E-PROM combines three building blocks:
 ```
 FAHP-Express  →  fuzzy criterion weights  →  Fuzzy PROMETHEE  →  ranking
                                                      │
-                                  Monte Carlo (CPP-style) stability analysis
+        Explain · Sensitivity · Agreement · Monte Carlo · FlowSort · Portfolio · Report
 ```
 
 Each decision maker (DM) evaluates the alternatives and supplies a short set of
@@ -19,11 +19,11 @@ quantity fuzzy, aggregates the DMs' flows, and defuzzifies only at the very end.
 ## 1. Quick start
 
 1. Fill the **evaluation workbook** (one sheet per DM) and the **FAHP-Express workbook** (one sheet per DM).
-2. Upload both files in the sidebar.
-3. For each criterion choose: data type, direction, preference function, and `q` / `p`.
+2. Upload both files in the sidebar. The **input validation** panel lists every problem with its sheet and cell.
+3. For each criterion choose: data type, direction, preference function, and `q` / `p`. The **threshold assistant** suggests starting values for `q` and `p`; you can **save / load** the whole configuration as a JSON file.
 4. Click **Run E-PROM** → ranking, flows, PROMETHEE I relations.
-5. Open the **Monte Carlo** tab to test how stable the ranking is.
-6. Download the Excel / CSV results.
+5. Use the analysis tabs: **Explain** (why this ranking), **Sensitivity** (how fragile it is), **Monte Carlo** (stability under uncertainty), **Classification** (ordered classes), **Portfolio** (best set under a budget).
+6. Download the Excel / CSV results or a complete **PDF report**.
 
 ---
 
@@ -295,7 +295,7 @@ For every ordered pair of alternatives `(i, j)`:
 
 ### 6.4 Group aggregation
 
-The DMs' fuzzy flows are **averaged in the fuzzy domain** (a-posteriori aggregation); the group
+The DMs' fuzzy flows are **averaged in the fuzzy domain** — a simple mean, or a weighted mean if you set decision-maker weights (a-posteriori aggregation); the group
 `Φ⁺`, `Φ⁻` and `Φ` are then defuzzified by COA. The ranking sorts alternatives by the defuzzified net flow Φ
 (rank 1 = highest Φ; ties share the average rank).
 
@@ -363,30 +363,96 @@ Templates: `E_PROM_Evaluations_Template.xlsx` and `E_PROM_FAHP_Express_Template.
 
 ---
 
-## 8. Recommended workflow
+## 8. Analysis tools
+
+### 8.1 Input validation
+
+As soon as a workbook is uploaded the app checks it and shows **every** problem at once, each with its sheet and cell: empty or non-numeric cells, duplicated IDs, criteria or IDs that differ between decision makers, unknown linguistic terms or precision labels, a reference criterion that is not `Equal importance`, values below 1 in the reference row, ratios above 9, and mismatched sheet names. Errors block the run; warnings and notes do not. Before running, the values are also checked against the data types you configured (e.g. an ordinal value of 9 on a 7-point scale).
+
+### 8.2 Save / load configuration
+
+The sidebar can save the criteria setup (type, direction, preference function, `q`, `p`, scale), the decision-maker weights and the Monte Carlo settings to a small JSON file, and load it again later. Criteria are matched by **name**, so the file keeps working if the column order changes. The same file is appended to the PDF report for reproducibility.
+
+### 8.3 Threshold assistant (suggested q and p)
+
+For every criterion the assistant proposes a preference function and thresholds from your data and the attribute precision (see §4.3):
+
+- **Continuous:** Linear; `q` = fuzzy width of two equal values (about `2 · r_s · typical value`, rounded to a "nice" number); `p` = 75th percentile of the pairwise differences between alternatives, at least `2q`.
+- **Ordinal:** Level; `q` / `p` at the 25th / 75th percentiles of the pairwise differences, in scale units.
+
+These are **starting points**, not recommendations: the thresholds express your preferences, so review them. A plot shows the current and suggested preference functions, and you can apply the suggestions to selected criteria.
+
+### 8.4 Explain: contribution and pairwise comparison
+
+- **Contribution by criterion.** Each stacked bar splits the net flow of an alternative into the weighted contribution of each criterion (`COA(Φ⁺_k) − COA(Φ⁻_k)`). Positive parts help the alternative, negative parts hurt it. Defuzzification is not exactly additive, so the sum can differ slightly from the net flow.
+- **Pairwise comparison.** Pick two alternatives A and B to see, criterion by criterion, how much A is preferred to B and B to A, the criterion weights, the (average) values and which one each criterion favours.
+
+### 8.5 Sensitivity to the weights
+
+For each criterion the weight of every decision maker is multiplied by a factor and the weights are renormalized (the other criteria keep their relative proportions). The tool reports the **range of the weight share, around the current value, inside which the full ranking — and the first place — do not change**, and plots the net flows and positions along the sweep. Narrow ranges mean the result is fragile with respect to that weight. Ranges ending at 0 % or 100 % mean no change was found down to zero / up to the maximum explored.
+
+### 8.6 Agreement among decision makers and robustness
+
+- **Kendall's W** (concordance of the individual rankings, with tie correction): below 0.3 weak, 0.3–0.6 moderate, above 0.6 strong agreement. The **Spearman matrix** shows the agreement between each pair of DMs; a DM whose mean Spearman is below 0.5 (with three or more DMs) is flagged.
+- **Leave-one-decision-maker-out** re-runs the analysis without each DM in turn and reports whether the ranking or the first place changes.
+- **Rank-reversal test** removes each alternative in turn and lists the pairs whose relative order flips. PROMETHEE II is known to allow reversals; a result with none is more reassuring.
+- **Decision-maker weights** (sidebar, optional) give some DMs more influence: the fuzzy flows are combined with a weighted mean instead of a simple mean (equal weights by default). They also apply to the Monte Carlo.
+
+### 8.7 Classification — FlowSort
+
+Instead of ranking, FlowSort assigns each alternative to **ordered classes** separated by **limiting profiles**:
+
+1. Choose the number of classes (2–6) and their names (class 1 is the best).
+2. Edit the limiting profiles — one row per boundary, from the **worst** boundary (P1) to the **best** one, written in the same units as your data (ordinal values must be integers in the scale). The defaults are quantiles of your data.
+3. Each alternative is compared with the profiles inside the reference set `R ∪ {a}` using the same fuzzy preferences, weights and thresholds as the ranking; it is assigned to the class whose bounding profiles enclose its net flow: `Φ(r_h) ≤ Φ(a) < Φ(r_{h+1})`. DM flows are aggregated in the fuzzy domain before defuzzification.
+4. The table also shows the class proposed by each DM and, optionally, the **probability of each class** from the Monte Carlo (same settings as the Monte Carlo tab).
+
+The profiles must get strictly better from P1 to the last one on the weighted criteria; the app warns when their net flows are not increasing.
+
+### 8.8 Portfolio selection — PROMETHEE V
+
+When you can pick several alternatives, ranking is not enough. PROMETHEE V maximizes the **total net flow of the selected set** subject to:
+
+- **resource budgets** on continuous criteria (e.g. cost; values are averaged over the DMs);
+- a minimum and maximum **number** of alternatives;
+- **mandatory** and **excluded** alternatives.
+
+The problem is solved exactly as a 0-1 integer program. The result is compared with the *ranking-order baseline* (walk down the ranking keeping what still fits): the optimum can be better because a lower-ranked alternative may use the budget more efficiently. Alternatives with a negative net flow are chosen only when needed to reach the minimum number.
+
+### 8.9 PDF report
+
+The **Report** tab builds a PDF with the ranking, PROMETHEE I relations, configuration, precision, weights and every analysis you ran in the session (contribution, sensitivity, agreement, robustness checks, Monte Carlo, classification, portfolio), plus the configuration file for reproducibility.
+
+---
+
+## 9. Recommended workflow
 
 1. Define alternatives and criteria; decide for each criterion its type (ordinal / continuous) and direction.
 2. Collect each DM's evaluations (same IDs, same criterion names).
 3. Collect each DM's FAHP-Express row (reference + comparisons) and the **attribute precision**.
 4. Upload both workbooks and configure the criteria (function, `q`, `p`, scale).
-5. Check `q` and `p` against the fuzzy widths of §4.3.
+5. Fix any problem listed by the validation panel; use the threshold assistant for `q` and `p` and check them against §4.3.
 6. Run the deterministic E-PROM; inspect ranking, Φ per DM and PROMETHEE I relations.
-7. Compare the DMs' individual Φ — large disagreement is a signal to discuss before aggregating.
-8. Run the Monte Carlo; inspect first-place frequency, rank acceptability and weight spread.
-9. Report the deterministic ranking **together with** its stability.
-10. Export the results.
+7. Use **Explain** to understand the ranking and **Decision Makers** to check agreement — large disagreement is a signal to discuss before aggregating.
+8. Test fragility: **Sensitivity** (weights), robustness checks, and the **Monte Carlo** (first-place frequency, rank acceptability, weight spread).
+9. If the decision is a classification or a selection of several alternatives, use **Classification** or **Portfolio**.
+10. Save the configuration, export the results and generate the PDF report (the ranking **together with** its stability).
 
 ---
 
-## 9. Glossary
+## 10. Glossary
 
 | Term | Meaning |
 |---|---|
 | **TFN / trapezoid** | Fuzzy number `[a, b, c, d]` with support `[a, d]` and core `[b, c]`. |
 | **COA** | Center of Area — defuzzification that returns the x-coordinate of the trapezoid's centroid. |
 | **Φ⁺, Φ⁻, Φ** | Positive (leaving), negative (entering) and net PROMETHEE flows. |
+| **Weight share** | Crisp weight of a criterion divided by the sum of all weights. |
 | **Reference criterion** | The criterion each DM compares all others against in FAHP-Express (first column). |
 | **Attribute precision** | High / Medium / Low confidence of a DM in the evaluations of one criterion. |
 | **q / p** | Indifference / preference thresholds of the preference function. |
 | **Rank acceptability** | Probability that an alternative occupies a given rank. |
+| **FlowSort** | PROMETHEE-based sorting of alternatives into ordered classes delimited by limiting profiles. |
+| **PROMETHEE V** | Selection of the best set of alternatives under constraints (budget, number, mandatory / excluded). |
+| **Kendall's W** | Coefficient of concordance among the decision makers' rankings (0 = none, 1 = perfect). |
 | **CPP** | Composition of Probabilistic Preferences: probabilistic treatment of preferences when inputs are distributions. |

@@ -74,3 +74,14 @@ def defuzz_coa(T):
     return float(
         ((c + d) ** 2 - c * d - (a + b) ** 2 + a * b) / den
     )
+
+
+def defuzz_coa_array(T):
+    """Vectorized Center-of-Area for an array shaped [..., 4]."""
+    T = np.asarray(T, dtype=float)
+    a, b, c, d = T[..., 0], T[..., 1], T[..., 2], T[..., 3]
+    den = 3.0 * (c + d - a - b)
+    safe = np.where(np.abs(den) < 1e-12, 1.0, den)
+    num = (c + d) ** 2 - c * d - (a + b) ** 2 + a * b
+    out = np.where(np.abs(den) < 1e-12, T.mean(axis=-1), num / safe)
+    return np.where(np.abs(d - a) < 1e-12, b, out)

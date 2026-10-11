@@ -1,5 +1,6 @@
-E-PROM v7.4 — fixes and English release
-- Fixed: Monte Carlo precision matrix orientation, PROMETHEE I relations, blank precision cells, 9-point fuzzy scale (level 5).
-- Monte Carlo: weights bootstrapped by decision maker; ties share rank credit; vectorized (much faster).
-- Decision makers are paired by sheet name across the two workbooks.
-- Core, app, templates and guide are in English; Portuguese workbooks are still accepted.
+E-PROM v8.0 — analysis toolkit
+New: input validation with cell-level report; save/load configuration (JSON); threshold assistant (q/p);
+criterion contribution and pairwise comparison; weight sensitivity with stability ranges; agreement among
+decision makers (Kendall W, Spearman), leave-one-out and rank-reversal checks; decision-maker weights;
+FlowSort classification (with Monte Carlo class probabilities); PROMETHEE V portfolio selection;
+PDF report. Guide shown on the start screen.

@@ -85,6 +85,47 @@ def _sub_vec(X, Y):
     ], axis=-1)
 
 
+def _weighted_preference(Fk, wk, direction, pref_type, q, p):
+    """w_k (x) P_k(i, j) for one criterion: array [n, n, 4] (diagonal not zeroed)."""
+    Ai = Fk[:, None, :]
+    Bj = Fk[None, :, :]
+
+    D = _sub_vec(Ai, Bj) if direction == 1 else _sub_vec(Bj, Ai)
+
+    Pk = np.sort(
+        pref_array(D, int(pref_type), float(q), float(p)),
+        axis=-1,
+    )
+    return _mul_geldermann_vec(wk, Pk)
+
+
+def preference_tensor(F, w_fuzzy, crit_dir, pref_types, q_vals, p_vals):
+    """Weighted fuzzy preferences per criterion: [criterion, i, j, 4].
+
+    The diagonal (i == j) is zero. Summing over criteria gives the fuzzy
+    multicriteria preference index used by :func:`run_fuzzy_promethee_trap`.
+    """
+    F = np.asarray(F, dtype=float)
+    w_fuzzy = np.asarray(w_fuzzy, dtype=float)
+    n_req, n_crit, _ = F.shape
+
+    out = np.zeros((n_crit, n_req, n_req, 4), dtype=float)
+    idx = np.arange(n_req)
+
+    for k in range(n_crit):
+        out[k] = _weighted_preference(
+            F[:, k, :], w_fuzzy[k], crit_dir[k], pref_types[k], q_vals[k], p_vals[k]
+        )
+        out[k][idx, idx, :] = 0.0
+
+    return out
+
+
+def sub_vec(X, Y):
+    """Interval subtraction X - Y for arrays shaped [..., 4]."""
+    return _sub_vec(np.asarray(X, dtype=float), np.asarray(Y, dtype=float))
+
+
 def run_fuzzy_promethee_trap(
     F,
     w_fuzzy,
@@ -123,19 +164,9 @@ def run_fuzzy_promethee_trap(
     PI = np.zeros((n_req, n_req, 4), dtype=float)
 
     for k in range(n_crit):
-        Ai = F[:, k, :][:, None, :]
-        Bj = F[:, k, :][None, :, :]
-
-        if crit_dir[k] == 1:
-            D = _sub_vec(Ai, Bj)
-        else:
-            D = _sub_vec(Bj, Ai)
-
-        Pk = np.sort(
-            pref_array(D, int(pref_types[k]), float(q_vals[k]), float(p_vals[k])),
-            axis=-1,
+        PI += _weighted_preference(
+            F[:, k, :], w_fuzzy[k], crit_dir[k], pref_types[k], q_vals[k], p_vals[k]
         )
-        PI += _mul_geldermann_vec(w_fuzzy[k], Pk)
 
     idx = np.arange(n_req)
     PI[idx, idx, :] = 0.0

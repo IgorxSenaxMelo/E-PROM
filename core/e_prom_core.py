@@ -283,6 +283,20 @@ def normalize_precision_matrix(precision_levels, n_exp, n_crit):
     return [[normalize_precision(x) for x in row] for row in rows]
 
 
+def normalize_expert_weights(expert_weights, n_exp):
+    """Return a normalized weight vector for the decision makers."""
+    if expert_weights is None:
+        return np.full(n_exp, 1.0 / n_exp)
+    w = np.asarray(expert_weights, dtype=float).reshape(-1)
+    if len(w) != n_exp:
+        raise ValueError(
+            f"{len(w)} decision-maker weights were given for {n_exp} decision makers."
+        )
+    if np.any(w < 0) or not np.all(np.isfinite(w)) or w.sum() <= 0:
+        raise ValueError("Decision-maker weights must be non-negative and not all zero.")
+    return w / w.sum()
+
+
 def run_e_prom(
     evaluations,
     weights_fuzzy_individual,
@@ -295,6 +309,7 @@ def run_e_prom(
     precision_levels=None,
     precision_support_pct=None,
     precision_core_pct=None,
+    expert_weights=None,
 ):
     """Run E-PROM for each decision maker and aggregate the fuzzy flows.
 
@@ -374,10 +389,12 @@ def run_e_prom(
         phi_minus_fuzzy_exp[:, :, e] = pmf
         phi_net_fuzzy_exp[:, :, e] = pnf
 
-    # A-posteriori aggregation of the fuzzy flows.
-    plus_fuzzy = np.mean(phi_plus_fuzzy_exp, axis=2)
-    minus_fuzzy = np.mean(phi_minus_fuzzy_exp, axis=2)
-    net_fuzzy = np.mean(phi_net_fuzzy_exp, axis=2)
+    # A-posteriori aggregation of the fuzzy flows (weighted mean over DMs;
+    # equal weights by default).
+    ew = normalize_expert_weights(expert_weights, n_exp)
+    plus_fuzzy = np.average(phi_plus_fuzzy_exp, axis=2, weights=ew)
+    minus_fuzzy = np.average(phi_minus_fuzzy_exp, axis=2, weights=ew)
+    net_fuzzy = np.average(phi_net_fuzzy_exp, axis=2, weights=ew)
 
     plus = np.array([defuzz_coa(x) for x in plus_fuzzy])
     minus = np.array([defuzz_coa(x) for x in minus_fuzzy])
@@ -414,4 +431,5 @@ def run_e_prom(
         "precision_levels": precision_matrix,
         "precision_support_pct": precision_support_pct,
         "precision_core_pct": precision_core_pct,
+        "expert_weights": ew,
     }

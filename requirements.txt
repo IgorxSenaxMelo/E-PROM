@@ -1,5 +1,7 @@
 streamlit
 pandas
 numpy
+scipy>=1.9
 openpyxl
 plotly
+reportlab

@@ -19,6 +19,7 @@ import numpy as np
 from .e_prom_core import (
     _validate_preferences,
     build_fuzzy_matrix,
+    normalize_expert_weights,
     normalize_precision_matrix,
 )
 from .fahp import (
@@ -28,6 +29,7 @@ from .fahp import (
 )
 from .fuzzy_numbers import defuzz_coa
 from .labels import CONTINUOUS, ORDINAL, normalize_type
+from .flowsort import _fuzzy_inputs, flowsort_from_fuzzy
 from .promethee import TIE_TOL, rank_from_net_flow, run_fuzzy_promethee_trap
 
 WEIGHT_SAMPLING_MODES = ("dm_bootstrap", "independent")
@@ -85,6 +87,8 @@ def run_e_prom_monte_carlo(
     precision_support_pct=None,
     precision_core_pct=None,
     weight_sampling="dm_bootstrap",
+    expert_weights=None,
+    flowsort_profiles=None,
 ):
     """Stability analysis of E-PROM.
 
@@ -99,6 +103,11 @@ def run_e_prom_monte_carlo(
       5. defuzzify, rank and accumulate the statistics.
 
     ``precision_levels`` must have shape (decision makers, criteria).
+
+    If ``flowsort_profiles`` ([profiles, criteria], worst boundary first) is
+    given, every iteration also classifies the alternatives with FlowSort and
+    the result includes ``class_acceptability`` (% of simulations in each class,
+    class 0 = best).
     """
     if weight_sampling not in WEIGHT_SAMPLING_MODES:
         raise ValueError(
@@ -130,6 +139,7 @@ def run_e_prom_monte_carlo(
         )
 
     precision_matrix = normalize_precision_matrix(precision_levels, n_exp, n_crit)
+    ew = normalize_expert_weights(expert_weights, n_exp)
 
     ordinal_cols = [k for k, t in enumerate(types) if t == ORDINAL]
     continuous_cols = [k for k, t in enumerate(types) if t == CONTINUOUS]
@@ -149,6 +159,14 @@ def run_e_prom_monte_carlo(
 
     W_samples = np.zeros((n_mc, n_crit))
 
+    if flowsort_profiles is not None:
+        flowsort_profiles = np.asarray(flowsort_profiles, dtype=float)
+        _, F_prof_list = _fuzzy_inputs(
+            evaluations, flowsort_profiles, types, scales, precision_matrix
+        )
+        n_classes = flowsort_profiles.shape[0] + 1
+        class_counts = np.zeros((n_req, n_classes))
+
     v_frac = variation / 100.0
     alt_idx = np.arange(n_req)[:, None]
 
@@ -167,6 +185,7 @@ def run_e_prom_monte_carlo(
         phi_plus_fuzzy_exp = np.zeros((n_req, 4, n_exp))
         phi_minus_fuzzy_exp = np.zeros((n_req, 4, n_exp))
         phi_net_fuzzy_exp = np.zeros((n_req, 4, n_exp))
+        F_alt_list = []
 
         # 2) attributes per decision maker
         for e in range(n_exp):
@@ -192,6 +211,8 @@ def run_e_prom_monte_carlo(
                 precision_core_pct=precision_core_pct,
             )
 
+            F_alt_list.append(F_e)
+
             _, _, _, pp_f, pm_f, pn_f = run_fuzzy_promethee_trap(
                 F_e,
                 w_fuzzy_group,
@@ -206,10 +227,18 @@ def run_e_prom_monte_carlo(
             phi_minus_fuzzy_exp[:, :, e] = pm_f
             phi_net_fuzzy_exp[:, :, e] = pn_f
 
+        if flowsort_profiles is not None:
+            fs = flowsort_from_fuzzy(
+                F_alt_list, F_prof_list, [w_fuzzy_group] * n_exp,
+                directions, preference_types, q_vals, p_vals,
+                expert_weights=ew,
+            )
+            class_counts[np.arange(n_req), fs["class_index"]] += 1
+
         # 3) aggregate in the fuzzy domain, defuzzify afterwards
-        plus_f = phi_plus_fuzzy_exp.mean(axis=2)
-        minus_f = phi_minus_fuzzy_exp.mean(axis=2)
-        net_f = phi_net_fuzzy_exp.mean(axis=2)
+        plus_f = np.average(phi_plus_fuzzy_exp, axis=2, weights=ew)
+        minus_f = np.average(phi_minus_fuzzy_exp, axis=2, weights=ew)
+        net_f = np.average(phi_net_fuzzy_exp, axis=2, weights=ew)
 
         pp = np.array([defuzz_coa(x) for x in plus_f])
         pm = np.array([defuzz_coa(x) for x in minus_f])
@@ -236,7 +265,13 @@ def run_e_prom_monte_carlo(
 
     ddof = 1 if n_mc > 1 else 0
 
+    extra = {}
+    if flowsort_profiles is not None:
+        extra["class_acceptability"] = 100.0 * class_counts / n_mc
+        extra["flowsort_profiles"] = flowsort_profiles
+
     return {
+        **extra,
         "phi_mc": phi_mc,
         "phi_plus_mc": phi_plus_mc,
         "phi_minus_mc": phi_minus_mc,
