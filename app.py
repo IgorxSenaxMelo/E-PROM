@@ -2,7 +2,6 @@ from pathlib import Path
 import io
 import sys
 import tempfile
-import os
 
 import numpy as np
 import pandas as pd
@@ -12,14 +11,15 @@ import plotly.graph_objects as go
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from core.data_loader_v73 import (
+from core.data_loader import (
     read_expert_workbook,
     read_fahp_workbook,
 )
 from core.e_prom_core import run_e_prom
 from core.fuzzy_numbers import defuzz_coa
-from core.cpp import cpp_normal
+from core.labels import CONTINUOUS, ORDINAL
 from core.monte_carlo import run_e_prom_monte_carlo
+from core.promethee import promethee_i_relation
 
 
 st.set_page_config(
@@ -37,31 +37,6 @@ PREF_CODES = {
     "Linear": 5,
 }
 
-# Spreadsheet input vocabulary. These are translated to the numeric values
-# expected by the existing FAHP-Express core; the core itself is unchanged.
-LINGUISTIC_SCALE = {
-    "equal importance": 1,
-    "weakly more important": 2,
-    "moderately more important": 3,
-    "moderately to strongly more important": 4,
-    "strongly more important": 5,
-    "strongly to very strongly more important": 6,
-    "very strongly more important": 7,
-    "very strongly to extremely more important": 8,
-    "extremely more important": 9,
-}
-
-PRECISION_SCALE = {
-    "high": "Alta",
-    "medium": "Média",
-    "low": "Baixa",
-    # Backward compatibility with Portuguese workbooks.
-    "alta": "Alta",
-    "média": "Média",
-    "media": "Média",
-    "baixa": "Baixa",
-}
-
 
 def save_uploaded(f):
     tmp = tempfile.NamedTemporaryFile(
@@ -71,844 +46,6 @@ def save_uploaded(f):
     tmp.write(f.getvalue())
     tmp.close()
     return Path(tmp.name)
-
-
-def _criterion_key(value):
-    """Normaliza apenas espaços externos para comparação de nomes."""
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def _find_header_row(ws, required_headers, max_scan_rows=20):
-    """Localiza a linha de cabeçalho pelo conjunto de nomes esperado."""
-    required = {_criterion_key(x).casefold() for x in required_headers}
-    for r in range(1, min(ws.max_row, max_scan_rows) + 1):
-        values = {
-            _criterion_key(ws.cell(r, c).value).casefold()
-            for c in range(1, ws.max_column + 1)
-        }
-        if required.issubset(values):
-            return r
-    return None
-
-
-def _find_fahp_header_row(ws, max_scan_rows=30):
-    """Locate the FAHP criterion header without relying on sheet-title text.
-
-    The standard English template uses:
-        Criteria | criterion 1 | criterion 2 | ...
-
-    Legacy Portuguese workbooks use:
-        Critérios | critério 1 | critério 2 | ...
-
-    This helper deliberately checks the actual header row and does not infer
-    the header from A1, sheet name, or the order of criteria.
-    """
-    for r in range(1, min(ws.max_row, max_scan_rows) + 1):
-        first = _criterion_key(ws.cell(r, 1).value).casefold()
-        if first not in {"criteria", "critérios"}:
-            continue
-
-        # Require at least two criterion names to avoid accepting a title row.
-        nonempty = 0
-        for c in range(2, ws.max_column + 1):
-            if _criterion_key(ws.cell(r, c).value):
-                nonempty += 1
-
-        if nonempty >= 2:
-            return r
-
-    return None
-
-
-def _criterion_columns(ws, header_row, first_criterion_col):
-    """Retorna {nome_do_criterio: coluna} a partir do cabeçalho."""
-    result = {}
-    for c in range(first_criterion_col, ws.max_column + 1):
-        value = _criterion_key(ws.cell(header_row, c).value)
-        if not value:
-            continue
-        if value in result:
-            raise ValueError(
-                f"Critério duplicado na aba '{ws.title}': '{value}'."
-            )
-        result[value] = c
-    return result
-
-
-def _reorder_columns_in_place(ws, header_row, first_criterion_col, canonical):
-    """Reordena somente o bloco de critérios, preservando os valores associados."""
-    col_map = _criterion_columns(ws, header_row, first_criterion_col)
-    current = list(col_map.keys())
-
-    canonical_keys = [_criterion_key(x) for x in canonical]
-    current_keys = [_criterion_key(x) for x in current]
-
-    if set(current_keys) != set(canonical_keys):
-        missing = [x for x in canonical_keys if x not in current_keys]
-        extra = [x for x in current_keys if x not in canonical_keys]
-        details = []
-        if missing:
-            details.append("ausentes: " + ", ".join(missing))
-        if extra:
-            details.append("extras: " + ", ".join(extra))
-        raise ValueError(
-            f"Aba '{ws.title}' possui critérios diferentes dos demais especialistas "
-            f"({'; '.join(details)})."
-        )
-
-    # Nenhuma alteração é feita quando a ordem já é a mesma.
-    if current_keys == canonical_keys:
-        return
-
-    # O aplicativo trabalha com os valores das células. Fazemos a reordenação
-    # em uma cópia dos valores para que cada avaliação/referência permaneça
-    # ligada ao nome do critério, independentemente da posição da coluna.
-    max_row = ws.max_row
-    snapshots = {
-        name: [ws.cell(r, col_map[name]).value for r in range(header_row, max_row + 1)]
-        for name in canonical_keys
-    }
-
-    target_cols = [col_map[name] for name in current_keys]
-    target_cols.sort()
-
-    for target_col, name in zip(target_cols, canonical_keys):
-        values = snapshots[name]
-        for offset, value in enumerate(values):
-            ws.cell(header_row + offset, target_col).value = value
-
-
-def translate_fahp_inputs(ws, header_row, col_map):
-    # Find the two semantic rows by their labels, independently of
-    # criterion order.
-    comparison_row = None
-    precision_row = None
-
-    for r in range(header_row, ws.max_row + 1):
-        label = ws.cell(r, 1).value
-        if label is None:
-            continue
-        key = str(label).strip().casefold()
-        if key == "comparação com referência" or key == "comparison with reference":
-            comparison_row = r
-        elif key == "precisão do atributo" or key == "attribute precision":
-            precision_row = r
-
-    if comparison_row is not None:
-        for col in col_map.values():
-            value = ws.cell(comparison_row, col).value
-            if isinstance(value, str):
-                key = " ".join(value.strip().casefold().split())
-                if key in LINGUISTIC_SCALE:
-                    ws.cell(comparison_row, col).value = LINGUISTIC_SCALE[key]
-                elif key:
-                    # Preserve numeric strings for backward compatibility.
-                    try:
-                        number = float(value.replace(",", "."))
-                        if number.is_integer():
-                            number = int(number)
-                        ws.cell(comparison_row, col).value = number
-                    except ValueError:
-                        pass
-
-    if precision_row is not None:
-        for col in col_map.values():
-            value = ws.cell(precision_row, col).value
-            if isinstance(value, str):
-                key = " ".join(value.strip().casefold().split())
-                if key in PRECISION_SCALE:
-                    ws.cell(precision_row, col).value = PRECISION_SCALE[key]
-
-def normalize_expert_workbook(path):
-    """
-    Aceita especialistas com os mesmos critérios em ordens diferentes.
-    A primeira aba de especialista define a ordem canônica; nas demais,
-    as colunas são realinhadas pelo nome do critério, sem alterar os valores.
-    """
-    from openpyxl import load_workbook
-
-    # Linguistic FAHP-Express scale.
-    # The core remains numeric; only the spreadsheet input layer translates
-    # the linguistic labels into the existing 1-9 Saaty-compatible values.
-    linguistic_scale = {
-        "equal importance": 1,
-        "weakly more important": 2,
-        "moderately more important": 3,
-        "moderately to strongly more important": 4,
-        "strongly more important": 5,
-        "strongly to very strongly more important": 6,
-        "very strongly more important": 7,
-        "very strongly to extremely more important": 8,
-        "extremely more important": 9,
-    }
-
-    precision_scale = {
-        "high": "Alta",
-        "medium": "Média",
-        "low": "Baixa",
-        # Backward compatibility with existing Portuguese spreadsheets.
-        "alta": "Alta",
-        "média": "Média",
-        "media": "Média",
-        "baixa": "Baixa",
-    }
-
-
-
-    wb = load_workbook(path, data_only=False)
-    sheets = [
-        ws for ws in wb.worksheets
-        if _criterion_key(ws.title).casefold() not in {"guide", "_lists"}
-    ]
-
-    if not sheets:
-        raise ValueError("A planilha de avaliações não possui abas de especialistas.")
-
-    first = sheets[0]
-    header_row = _find_header_row(first, ["ID", "Descrição"])
-    if header_row is None:
-        raise ValueError(
-            f"Não foi possível localizar o cabeçalho de avaliações na aba '{first.title}'."
-        )
-
-    first_cols = _criterion_columns(first, header_row, 3)
-    canonical = list(first_cols.keys())
-    if not canonical:
-        raise ValueError(
-            f"Nenhum critério foi encontrado na aba '{first.title}'."
-        )
-
-    for ws in sheets:
-        row = _find_header_row(ws, ["ID", "Descrição"])
-        if row is None:
-            raise ValueError(
-                f"Não foi possível localizar o cabeçalho de avaliações na aba '{ws.title}'."
-            )
-        _reorder_columns_in_place(ws, row, 3, canonical)
-
-    out = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-    out.close()
-    wb.save(out.name)
-    return Path(out.name)
-
-
-def normalize_fahp_workbook(path, expected_criteria):
-    """
-    Normaliza a planilha FAHP-Express pela identidade dos critérios, mas
-    preserva uma referência específica para cada decisor.
-
-    A referência de cada aba é o primeiro critério originalmente apresentado
-    naquela aba, conforme a convenção utilizada pelo data_loader_v73.py.
-    Portanto, decisores diferentes podem escolher referências diferentes.
-
-    A ordem final entregue ao data_loader é:
-        [referência do decisor] + [demais critérios na ordem canônica]
-
-    Os valores de "Comparação com referência" e "Precisão do atributo"
-    permanecem associados ao respectivo critério.
-    """
-    from openpyxl import load_workbook
-    import unicodedata
-    import re
-
-    def match_key(value):
-        """Chave de comparação tolerante a maiúsculas, acentos e separadores."""
-        text = _criterion_key(value).casefold()
-        text = unicodedata.normalize("NFKD", text)
-        text = "".join(
-            ch for ch in text
-            if not unicodedata.combining(ch)
-        )
-        text = re.sub(r"[-–—_/]+", " ", text)
-        text = re.sub(r"\\s+", " ", text).strip()
-
-        # Compatibilidade com a nomenclatura usada na planilha FAHP antiga:
-        # "CUSTO" corresponde a "Custo-benefício".
-        if text in {"custo", "custo beneficio"}:
-            return "custo-beneficio"
-
-        return text
-
-    wb = load_workbook(path, data_only=False)
-    sheets = [
-        ws for ws in wb.worksheets
-        if _criterion_key(ws.title).casefold() not in {"guide", "_lists"}
-    ]
-
-    if not sheets:
-        raise ValueError(
-            "A planilha FAHP-Express não possui abas de especialistas."
-        )
-
-    canonical = [_criterion_key(x) for x in expected_criteria]
-    if not canonical or any(not x for x in canonical):
-        raise ValueError(
-            "Não foi possível determinar os critérios da planilha de avaliações."
-        )
-
-    canonical_by_key = {}
-    for name in canonical:
-        key = match_key(name)
-        if key in canonical_by_key:
-            raise ValueError(
-                f"Critérios ambíguos na planilha de avaliações: "
-                f"'{canonical_by_key[key]}' e '{name}'."
-            )
-        canonical_by_key[key] = name
-
-    canonical_keys = [match_key(name) for name in canonical]
-
-    for ws in sheets:
-        # The standard template places the criterion header on the row
-        # whose first cell is "Criteria" (English) or "Critérios" (legacy).
-        # Do not depend on the title text in A1; it is only a sheet title.
-        header_row = _find_fahp_header_row(ws)
-        if header_row is None:
-            raise ValueError(
-                f"Could not locate the FAHP-Express criteria header "
-                f"in sheet '{ws.title}'. Expected a row beginning with "
-                f"'Criteria' or 'Critérios'."
-            )
-
-        # Normalize English workbook labels back to the legacy labels expected
-        # by data_loader_v73.py. This keeps the computational core unchanged.
-        internal_labels = {
-            "Criteria": "Critérios",
-            "Comparison with reference": "Comparação com referência",
-            "Attribute precision": "Precisão do atributo",
-            "Reference": "Referência",
-            "Interpretation": "Interpretação",
-            "Notes": "Observação",
-        }
-        for r in range(1, ws.max_row + 1):
-            value = ws.cell(r, 1).value
-            if isinstance(value, str) and value.strip() in internal_labels:
-                ws.cell(r, 1).value = internal_labels[value.strip()]
-
-        col_map = _criterion_columns(ws, header_row, 2)
-        current_names = list(col_map.keys())
-        current_keys = [match_key(x) for x in current_names]
-
-        if len(current_keys) != len(set(current_keys)):
-            raise ValueError(
-                f"Aba FAHP '{ws.title}' possui critérios duplicados."
-            )
-
-        current_by_key = {
-            key: name
-            for key, name in zip(current_keys, current_names)
-        }
-
-        missing = [
-            canonical_by_key[key]
-            for key in canonical_keys
-            if key not in current_by_key
-        ]
-        extra = [
-            current_by_key[key]
-            for key in current_keys
-            if key not in canonical_by_key
-        ]
-
-        if missing or extra:
-            details = []
-            if missing:
-                details.append("ausentes: " + ", ".join(missing))
-            if extra:
-                details.append("extras: " + ", ".join(extra))
-            raise ValueError(
-                f"Aba FAHP '{ws.title}' possui critérios diferentes "
-                f"({'; '.join(details)})."
-            )
-
-        # Translate the spreadsheet representation only at the input layer.
-        # The core continues to receive the same numeric representation.
-        translate_fahp_inputs(ws, header_row, col_map)
-
-        # A referência é individual de cada decisor: é o primeiro critério
-        # que estava na aba original. Não usamos a referência da primeira aba.
-        reference_key = current_keys[0]
-
-        # O data_loader exige a referência na primeira coluna.
-        target_keys = [reference_key] + [
-            key for key in canonical_keys
-            if key != reference_key
-        ]
-
-        if current_keys == target_keys:
-            continue
-
-        # Captura os valores por identidade do critério antes de escrever.
-        snapshots = {
-            key: [
-                ws.cell(r, col_map[current_by_key[key]]).value
-                for r in range(header_row, ws.max_row + 1)
-            ]
-            for key in current_keys
-        }
-
-        target_cols = sorted(col_map.values())
-
-        for target_col, key in zip(target_cols, target_keys):
-            values = snapshots[key]
-            for offset, value in enumerate(values):
-                ws.cell(
-                    header_row + offset,
-                    target_col,
-                ).value = value
-
-    # The legacy computational core expects every sheet in the temporary
-    # FAHP workbook to be a decision-maker sheet.  The user-facing workbook
-    # may contain Guide and hidden helper sheets, so remove those sheets only
-    # from this temporary computational copy. The uploaded workbook itself is
-    # never modified, and the core remains unchanged.
-    removable = [
-        ws for ws in wb.worksheets
-        if _criterion_key(ws.title).casefold() in {"guide", "_lists"}
-    ]
-    for ws in removable:
-        wb.remove(ws)
-
-    if not wb.worksheets:
-        raise ValueError(
-            "The FAHP-Express workbook contains no decision-maker sheets."
-        )
-
-    out = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-    out.close()
-    wb.save(out.name)
-    return Path(out.name)
-
-
-
-
-def read_mc_reference_rows_from_workbook(path, criteria, n_experts):
-    """
-    Recover the FAHP-Express reference vectors directly from the normalized
-    workbook, preserving each decision maker's own reference criterion.
-
-    Output contract for Monte Carlo:
-        (n_experts, n_criteria)
-
-    The values are returned in the canonical criterion order, even though
-    each normalized sheet stores its own reference criterion in column B.
-    """
-    from openpyxl import load_workbook
-    import unicodedata
-    import re
-
-    def key(value):
-        text = _criterion_key(value).casefold()
-        text = unicodedata.normalize("NFKD", text)
-        text = "".join(
-            ch for ch in text
-            if not unicodedata.combining(ch)
-        )
-        text = re.sub(r"[-–—_/]+", " ", text)
-        text = re.sub(r"\s+", " ", text).strip()
-        if text in {"custo", "custo beneficio"}:
-            return "custo-beneficio"
-        return text
-
-    def numeric(value):
-        if isinstance(value, (int, float, np.integer, np.floating)):
-            return float(value)
-        if value is None:
-            raise ValueError("Empty FAHP-Express reference value.")
-        text = str(value).strip()
-        lookup = {
-            k: float(v)
-            for k, v in LINGUISTIC_SCALE.items()
-        }
-        normalized = " ".join(text.casefold().split())
-        if normalized in lookup:
-            return lookup[normalized]
-        try:
-            return float(text.replace(",", "."))
-        except ValueError as exc:
-            raise ValueError(
-                f"Invalid FAHP-Express reference value '{value}'."
-            ) from exc
-
-    wb = load_workbook(path, data_only=True)
-    sheets = [
-        ws for ws in wb.worksheets
-        if key(ws.title) not in {
-            "guide", "_lists", "instructions", "instrucoes",
-            "orientacoes",
-        }
-    ]
-
-    if len(sheets) != n_experts:
-        raise ValueError(
-            "FAHP-Express workbook contains "
-            f"{len(sheets)} decision-maker sheets; expected {n_experts}."
-        )
-
-    canonical = [_criterion_key(c) for c in criteria]
-    canonical_keys = [key(c) for c in canonical]
-    rows = []
-
-    for ws in sheets:
-        header_row = _find_fahp_header_row(ws)
-        if header_row is None:
-            raise ValueError(
-                f"Could not locate the FAHP-Express criteria header "
-                f"in sheet '{ws.title}'."
-            )
-
-        col_by_key = {}
-        for c in range(2, ws.max_column + 1):
-            ck = key(ws.cell(header_row, c).value)
-            if ck:
-                col_by_key[ck] = c
-
-        # Locate the comparison-with-reference row.
-        comparison_row = None
-        for r in range(header_row + 1, min(ws.max_row, header_row + 8) + 1):
-            first = ws.cell(r, 1).value
-            if isinstance(first, str) and key(first) in {
-                "comparison with reference",
-                "comparacao com referencia",
-            }:
-                comparison_row = r
-                break
-
-        if comparison_row is None:
-            raise ValueError(
-                f"Could not find 'Comparison with reference' "
-                f"in FAHP sheet '{ws.title}'."
-            )
-
-        # Each normalized sheet has its own reference in the first criterion
-        # column (column B). This is the decisive reference criterion.
-        reference_key = key(ws.cell(header_row, 2).value)
-
-        if reference_key not in col_by_key:
-            raise ValueError(
-                f"Reference criterion could not be recovered from "
-                f"FAHP sheet '{ws.title}'."
-            )
-
-        # Read by criterion identity, not by physical column position.
-        row_by_key = {}
-        for ck, col in col_by_key.items():
-            row_by_key[ck] = numeric(ws.cell(comparison_row, col).value)
-
-        missing = [c for c, ck in zip(canonical, canonical_keys)
-                   if ck not in row_by_key]
-        if missing:
-            raise ValueError(
-                f"FAHP sheet '{ws.title}' is missing reference values for: "
-                + ", ".join(missing)
-            )
-
-        rows.append([row_by_key[ck] for ck in canonical_keys])
-
-    arr = np.asarray(rows, dtype=float)
-    expected = (n_experts, len(criteria))
-    if arr.shape != expected:
-        raise ValueError(
-            "FAHP-Express reference rows have dimension "
-            f"{arr.shape}; expected {expected}."
-        )
-
-    return arr
-
-
-def read_precision_levels_from_workbook(path, criteria, n_experts):
-    """
-    Read Attribute precision directly from every decision-maker sheet.
-
-    This is intentionally kept at the application/input boundary. The
-    computational core continues to receive the same matrix:
-        (decision makers, criteria)
-
-    The previous version relied on the generic FAHP reader, which could
-    collapse the precision rows when the workbook contained multiple
-    decision-maker sheets.
-    """
-    from openpyxl import load_workbook
-
-    def key(value):
-        if value is None:
-            return ""
-        return _criterion_key(value).casefold().strip()
-
-    wb = load_workbook(path, data_only=True)
-
-    sheets = [
-        ws for ws in wb.worksheets
-        if key(ws.title) not in {"guide", "_lists"}
-    ]
-
-    if len(sheets) < n_experts:
-        raise ValueError(
-            "The FAHP-Express workbook contains fewer decision-maker sheets "
-            f"({len(sheets)}) than expected ({n_experts})."
-        )
-
-    criteria_keys = [key(c) for c in criteria]
-    precision = []
-
-    for ws in sheets[:n_experts]:
-        header_row = None
-        header = None
-
-        # Locate the row containing "Criteria".
-        for r in range(1, min(ws.max_row, 30) + 1):
-            values = [
-                ws.cell(r, c).value
-                for c in range(1, ws.max_column + 1)
-            ]
-            if any(
-                isinstance(v, str)
-                and key(v) in {"criteria", "critérios"}
-                for v in values
-            ):
-                header_row = r
-                header = values
-                break
-
-        if header_row is None:
-            raise ValueError(
-                f"Could not find the 'Criteria' header in FAHP sheet '{ws.title}'."
-            )
-
-        col_by_key = {}
-        for c in range(2, ws.max_column + 1):
-            k = key(ws.cell(header_row, c).value)
-            if k:
-                col_by_key[k] = c
-
-        # Find "Attribute precision" row.
-        precision_row = None
-        for r in range(header_row + 1, min(ws.max_row, header_row + 8) + 1):
-            first = ws.cell(r, 1).value
-            if isinstance(first, str) and key(first) in {
-                "attribute precision",
-                "precisão do atributo",
-            }:
-                precision_row = r
-                break
-
-        if precision_row is None:
-            raise ValueError(
-                f"Could not find 'Attribute precision' in FAHP sheet '{ws.title}'."
-            )
-
-        row = []
-        for criterion, ck in zip(criteria, criteria_keys):
-            if ck not in col_by_key:
-                # Compatibility with the historical CUSTO/Custo-benefício name.
-                alt = "custo" if ck == "custo-benefício" else None
-                if alt and alt in col_by_key:
-                    col = col_by_key[alt]
-                else:
-                    raise ValueError(
-                        f"Criterion '{criterion}' was not found in FAHP sheet '{ws.title}'."
-                    )
-
-            else:
-                col = col_by_key[ck]
-
-            value = ws.cell(precision_row, col).value
-            if value is None or str(value).strip() == "":
-                value = "High"
-
-            row.append(str(value).strip())
-
-        precision.append(row)
-
-    # Exact core contract: (decision makers, criteria).
-    arr = np.asarray(precision, dtype=object)
-    expected = (n_experts, len(criteria))
-
-    if arr.shape != expected:
-        raise ValueError(
-            "The FAHP-Express precision matrix read from the workbook has "
-            f"dimension {arr.shape}; expected {expected}."
-        )
-
-    return arr.tolist()
-
-
-def normalize_precision_levels_shape(fahp, n_experts, n_criteria):
-    """
-    Final defensive normalization for compatibility with older readers.
-    """
-    raw = fahp.get("precision_levels")
-
-    if raw is None:
-        fahp["precision_levels"] = [
-            ["High"] * n_criteria for _ in range(n_experts)
-        ]
-        return fahp
-
-    arr = np.asarray(raw, dtype=object)
-
-    expected = (n_experts, n_criteria)
-    transposed = (n_criteria, n_experts)
-
-    if arr.ndim == 1 and arr.size == n_experts * n_criteria:
-        arr = arr.reshape(expected)
-    elif arr.ndim == 2 and arr.shape == transposed and arr.shape != expected:
-        arr = arr.T
-    elif arr.shape != expected:
-        # Do not silently duplicate a single decision maker. The workbook
-        # reader should be corrected at the source whenever possible.
-        raise ValueError(
-            "The FAHP-Express precision matrix has dimension "
-            f"{arr.shape}; expected {expected}."
-        )
-
-    fahp["precision_levels"] = arr.tolist()
-    return fahp
-
-
-def get_fahp_decision_maker_names(path, n_experts):
-    """Return actual FAHP decision-maker sheet names in workbook order."""
-    from openpyxl import load_workbook
-
-    wb = load_workbook(path, read_only=True, data_only=True)
-    names = [
-        ws.title
-        for ws in wb.worksheets
-        if _criterion_key(ws.title).casefold() not in {
-            "guide", "_lists", "instructions", "instruções",
-            "orientações",
-        }
-    ]
-
-    if len(names) != n_experts:
-        raise ValueError(
-            "The FAHP-Express workbook contains "
-            f"{len(names)} decision-maker sheets; expected {n_experts}."
-        )
-
-    return names
-
-
-def rebuild_individual_fahp_weights(fahp_path, n_criteria, n_experts, canonical_criteria):
-    """
-    Rebuild individual fuzzy weights while preserving the criterion identity.
-
-    The legacy FAHP reader requires each expert's reference criterion to be
-    the first column. Therefore the normalized workbook is intentionally
-    reference-first. Its returned weight vector must be mapped back to the
-    application's canonical criterion order before plotting, aggregation, or
-    any downstream E-PROM operation.
-    """
-    from openpyxl import load_workbook
-
-    wb = load_workbook(fahp_path, data_only=True)
-
-    decision_sheets = [
-        ws.title
-        for ws in wb.worksheets
-        if _criterion_key(ws.title).casefold() not in {
-            "guide", "_lists", "instructions", "instruções", "orientações"
-        }
-    ]
-
-    if len(decision_sheets) != n_experts:
-        raise ValueError(
-            "The FAHP-Express workbook contains "
-            f"{len(decision_sheets)} decision-maker sheets; "
-            f"expected {n_experts}."
-        )
-
-    canonical_keys = [_criterion_key(c).casefold() for c in canonical_criteria]
-    individual = []
-
-    # The normalized workbook has the individual reference first, followed
-    # by the remaining canonical criteria. We recover the exact criterion
-    # order from each sheet and then reorder the returned fuzzy weights.
-    for sheet_name in decision_sheets:
-        single = load_workbook(fahp_path, data_only=False)
-
-        for ws in list(single.worksheets):
-            if ws.title != sheet_name:
-                single.remove(ws)
-
-        # The legacy loader requires a final support/instructions sheet.
-        support = single.create_sheet("_Guide")
-        support["A1"] = "Guide"
-        support["A2"] = "FAHP-Express workbook support sheet."
-
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-        tmp.close()
-
-        try:
-            single.save(tmp.name)
-
-            one = read_fahp_workbook(
-                Path(tmp.name),
-                n_criteria=n_criteria,
-            )
-
-            wf = np.asarray(one["w_fuzzy_individual"], dtype=float)
-            if wf.ndim == 2 and wf.shape == (n_criteria, 4):
-                wf = wf[:, :, np.newaxis]
-
-            if wf.shape != (n_criteria, 4, 1):
-                raise ValueError(
-                    f"FAHP sheet '{sheet_name}' produced fuzzy weights with "
-                    f"dimension {wf.shape}; expected "
-                    f"({n_criteria}, 4, 1)."
-                )
-
-            # Recover the exact criterion order of this expert's normalized
-            # sheet. This is the order used by the legacy reader.
-            original_ws = wb[sheet_name]
-            header_row = _find_fahp_header_row(original_ws)
-            col_map = _criterion_columns(original_ws, header_row, 2)
-
-            sheet_order = [
-                _criterion_key(original_ws.cell(header_row, c).value).casefold()
-                for c in sorted(col_map.values())
-            ]
-
-            if len(sheet_order) != n_criteria:
-                raise ValueError(
-                    f"FAHP sheet '{sheet_name}' contains {len(sheet_order)} "
-                    f"criteria; expected {n_criteria}."
-                )
-
-            pos = {key: i for i, key in enumerate(sheet_order)}
-
-            missing = [key for key in canonical_keys if key not in pos]
-            if missing:
-                raise ValueError(
-                    f"FAHP sheet '{sheet_name}' is missing criteria: "
-                    + ", ".join(missing)
-                )
-
-            # Map reference-first output back to canonical order.
-            reorder = [pos[key] for key in canonical_keys]
-            wf_canonical = wf[reorder, :, 0]
-
-            individual.append(wf_canonical)
-
-        finally:
-            try:
-                os.unlink(tmp.name)
-            except OSError:
-                pass
-
-    stacked = np.stack(individual, axis=2)
-
-    expected = (n_criteria, 4, n_experts)
-    if stacked.shape != expected:
-        raise ValueError(
-            "The reconstructed individual FAHP weights have dimension "
-            f"{stacked.shape}; expected {expected}."
-        )
-
-    return stacked
-
 
 
 def result_df(data, result):
@@ -976,7 +113,7 @@ def excel_bytes(data, result, config, fahp):
 
         precision_matrix = fahp.get(
             "precision_levels",
-            [["Alta"] * len(data["criteria"]) for _ in fahp.get("expert_names", [])],
+            [["High"] * len(data["criteria"]) for _ in fahp.get("expert_names", [])],
         )
         # Keep the exported precision table dimensionally consistent.
         # Some legacy reader paths provide fewer expert names than precision
@@ -1002,11 +139,6 @@ def excel_bytes(data, result, config, fahp):
             index=expert_names,
             columns=data["criteria"],
         )
-        precision_df = precision_df.replace({
-            "Alta": "High",
-            "Média": "Medium",
-            "Baixa": "Low",
-        })
         precision_df.index.name = "Decision maker"
         precision_df.to_excel(
             writer,
@@ -1082,52 +214,23 @@ def relation_matrix(result):
     )
 
     n = len(plus)
-    rel = np.empty(
-        (n, n),
-        dtype=object,
-    )
-
-    eps = 1e-10
+    rel = np.empty((n, n), dtype=object)
 
     for i in range(n):
         for j in range(n):
-
-            if i == j:
-                rel[i, j] = "I"
-                continue
-
-            a = (
-                plus[i] > plus[j] + eps
-                and minus[i] < minus[j] - eps
+            rel[i, j] = (
+                "I" if i == j
+                else promethee_i_relation(plus[i], minus[i], plus[j], minus[j])
             )
-
-            b = (
-                plus[i] < plus[j] - eps
-                and minus[i] > minus[j] + eps
-            )
-
-            eq = (
-                abs(plus[i] - plus[j]) <= eps
-                and abs(minus[i] - minus[j]) <= eps
-            )
-
-            if a:
-                rel[i, j] = "P"
-            elif b:
-                rel[i, j] = "P-"
-            elif eq:
-                rel[i, j] = "I"
-            else:
-                rel[i, j] = "R"
 
     return rel
 
 
 def alternative_labels(data):
-    """Retorna os nomes das alternativas para exibição nos gráficos.
+    """Return the alternative names used as chart labels.
 
-    Os cálculos continuam usando os IDs internamente. Quando houver uma
-    descrição válida, ela é usada apenas como rótulo visual.
+    Calculations keep using the IDs internally. A valid description is used
+    only as a visual label.
     """
     ids = [str(x) for x in data["ids"]]
     descriptions = data.get("descriptions", [])
@@ -1143,8 +246,8 @@ def alternative_labels(data):
         if not label:
             label = alt_id
 
-        # Evita rótulos visualmente indistinguíveis quando duas
-        # alternativas possuem a mesma descrição.
+        # Avoid visually identical labels when two alternatives share
+        # the same description.
         count = used.get(label, 0) + 1
         used[label] = count
         if count > 1:
@@ -1271,7 +374,7 @@ def plot_mc_rank_acceptability(data, mc):
         )
     )
     fig.update_layout(
-        title="CPP/Monte Carlo — rank acceptability",
+        title="Monte Carlo — rank acceptability",
         xaxis_title="Position",
         yaxis_title="Alternative",
         height=max(550, len(labels) * 55),
@@ -1297,7 +400,7 @@ def plot_mc_outworking(data, mc):
         )
     )
     fig.update_layout(
-        title="CPP/Monte Carlo — outranking acceptability",
+        title="Monte Carlo — outranking acceptability",
         xaxis_title="Outranked alternative",
         yaxis_title="Outranking alternative",
         height=max(700, len(labels) * 55),
@@ -1334,93 +437,8 @@ st.caption(
 # MODELOS PARA DOWNLOAD
 # ================================================================
 
-def make_english_linguistic_fahp_template(template_bytes):
-    """Convert the existing FAHP-Express template to the English linguistic-input form.
-
-    This is presentation/input-layer conversion only. The workbook used for
-    computation is converted back to the numeric representation by
-    normalize_fahp_workbook().
-    """
-    from openpyxl import load_workbook
-
-    wb = load_workbook(io.BytesIO(template_bytes), data_only=False)
-
-    linguistic_terms = {
-        1: "Equal importance",
-        2: "Weakly more important",
-        3: "Moderately more important",
-        4: "Moderately to strongly more important",
-        5: "Strongly more important",
-        6: "Strongly to very strongly more important",
-        7: "Very strongly more important",
-        8: "Very strongly to extremely more important",
-        9: "Extremely more important",
-    }
-
-    for ws in wb.worksheets:
-        if str(ws.title).strip().casefold() == "guide":
-            # Translate the basic guide labels where they exist.
-            for row in ws.iter_rows():
-                for cell in row:
-                    if isinstance(cell.value, str):
-                        cell.value = {
-                            "Campo": "Field",
-                            "Orientação": "Guidance",
-                            "Referência": "Reference",
-                            "Demais critérios": "Other criteria",
-                            "Precisão": "Precision",
-                            "Critérios": "Criteria",
-                            "Decisores": "Decision makers",
-                            "Romance é o critério de referência e recebe comparação 1 consigo mesmo.":
-                                "The reference criterion receives Equal importance (1) against itself.",
-                            "Fator de 1 a 9 indica quanto a referência é mais importante que o critério correspondente.":
-                                "The 1–9 linguistic scale indicates how much more important the reference is than the corresponding criterion.",
-                            "Alta, Média ou Baixa; controla a largura da representação fuzzy.":
-                                "High, Medium, or Low; controls fuzzy representation width.",
-                            "Somente Decisor 1 e Decisor 2 são utilizados.":
-                                "Only Decision maker 1 and Decision maker 2 are used.",
-                        }.get(cell.value, cell.value)
-            continue
-
-        # Translate labels in the first column.
-        for r in range(1, ws.max_row + 1):
-            label = ws.cell(r, 1).value
-            if isinstance(label, str):
-                label_map = {
-                    "Critérios": "Criteria",
-                    "Comparação com referência": "Comparison with reference",
-                    "Precisão do atributo": "Attribute precision",
-                    "Referência": "Reference",
-                    "Interpretação": "Interpretation",
-                    "Observação": "Notes",
-                }
-                ws.cell(r, 1).value = label_map.get(label, label)
-
-        # Replace numeric 1–9 comparison values with linguistic terms.
-        for r in range(1, ws.max_row + 1):
-            label = ws.cell(r, 1).value
-            if str(label).strip().casefold() == "comparison with reference":
-                for c in range(2, ws.max_column + 1):
-                    value = ws.cell(r, c).value
-                    if isinstance(value, (int, float)) and int(value) in linguistic_terms:
-                        ws.cell(r, c).value = linguistic_terms[int(value)]
-
-            if str(label).strip().casefold() == "attribute precision":
-                for c in range(2, ws.max_column + 1):
-                    value = ws.cell(r, c).value
-                    if isinstance(value, str):
-                        pmap = {"Alta": "High", "Média": "Medium", "Baixa": "Low",
-                                "High": "High", "Medium": "Medium", "Low": "Low"}
-                        ws.cell(r, c).value = pmap.get(value.strip(), value)
-
-    out = io.BytesIO()
-    wb.save(out)
-    out.seek(0)
-    return out.getvalue()
-
-
 TEMPLATES_DIR = ROOT / "templates"
-EVAL_TEMPLATE = TEMPLATES_DIR / "E_PROM_Avaliacoes_Template.xlsx"
+EVAL_TEMPLATE = TEMPLATES_DIR / "E_PROM_Evaluations_Template.xlsx"
 FAHP_TEMPLATE = TEMPLATES_DIR / "E_PROM_FAHP_Express_Template.xlsx"
 
 st.markdown("### 📥 Download the template workbooks")
@@ -1447,11 +465,10 @@ with col_model_1:
 with col_model_2:
     if FAHP_TEMPLATE.exists():
         with open(FAHP_TEMPLATE, "rb") as f:
-            template_bytes = make_english_linguistic_fahp_template(f.read())
             st.download_button(
                 "⬇️ FAHP-Express Workbook",
-                data=template_bytes,
-                file_name="E_PROM_FAHP_Express_Linguistic_Template.xlsx",
+                data=f.read(),
+                file_name=FAHP_TEMPLATE.name,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 key="download_fahp_template",
@@ -1461,205 +478,12 @@ with col_model_2:
 
 st.divider()
 
-GUIDE_TEXT = """# E-PROM — Guide
-
-## 1. Objective
-
-The E-PROM (Express Fuzzy Preference Ranking with PROMETHEE — v7.3) combines:
-
-**FAHP-Express → fuzzy criterion weights → Fuzzy PROMETHEE**
-
-The method keeps fuzzy weights during Fuzzy PROMETHEE and applies defuzzification
-to the final flows.
-
----
-
-## 2. Evaluation file
-
-The evaluation workbook must contain:
-
-- one sheet per decision maker;
-- a final sheet named `Guide`, which is not processed;
-- column A: alternative ID;
-- column B: description;
-- column C onward: criteria.
-
-All decision makers must use the same alternative IDs, descriptions, and criterion names.
-The order of criteria may differ between decision makers; the application aligns them
-by criterion name while preserving each decision maker's own reference criterion.
-
----
-
-## 3. Criterion type
-
-### Ordinal
-
-Use when the evaluation is an ordered scale, for example:
-
-- 1–5;
-- 1–7;
-- 1–9.
-
-Allowed preference functions:
-
-- **Usual**
-- **Level**
-
-The ordinal value is converted to a trapezoidal fuzzy number.
-
-### Continuous
-
-Use for quantities such as:
-
-- cost;
-- schedule;
-- distance;
-- time;
-- consumption;
-- physical performance.
-
-Allowed preference functions:
-
-- **U-shape**
-- **V-shape**
-- **Linear**
-
-The value remains in its original unit.
-
----
-
-## 4. FAHP-Express linguistic input
-
-The FAHP-Express workbook accepts linguistic comparison terms instead of numeric
-comparison factors:
-
-| Value | Linguistic term |
-|---:|---|
-| 1 | Equal importance |
-| 2 | Weakly more important |
-| 3 | Moderately more important |
-| 4 | Moderately to strongly more important |
-| 5 | Strongly more important |
-| 6 | Strongly to very strongly more important |
-| 7 | Very strongly more important |
-| 8 | Very strongly to extremely more important |
-| 9 | Extremely more important |
-
-Each decision maker may use a different reference criterion. The reference
-criterion receives **Equal importance (1)**.
-
-The application translates these terms internally to the numeric 1–9 scale
-before calling the existing FAHP-Express core. The mathematical core is unchanged.
-
-### Attribute precision
-
-Use:
-
-- **High**
-- **Medium**
-- **Low**
-
-These labels are converted internally to the existing precision representation.
-
----
-
-## 5. Reference criterion
-
-Each decision maker may select a different reference criterion.
-
-For example:
-
-- Decision maker 1 → Romance;
-- Decision maker 2 → Memorable experiences.
-
-The reference criterion does not need to be the same across decision makers.
-
-The application identifies the reference from the first criterion in each FAHP-Express
-sheet, as required by the existing data loader, while preserving the criterion identity.
-
----
-
-## 6. Fuzzy PROMETHEE
-
-The E-PROM does not defuzzify the criterion weights before PROMETHEE.
-
-For each criterion:
-
-`fuzzy weight × fuzzy preference`
-
-The terms are aggregated to obtain fuzzy flows:
-
-- Φ+;
-- Φ−;
-- net Φ.
-
-Defuzzification by center of area is applied to the final flows to obtain the ranking.
-
----
-
-## 7. Monte Carlo / CPP
-
-The Monte Carlo module evaluates the stability of the result while preserving
-the fuzzy information during expert aggregation.
-
-### Ordinal criteria
-
-The distribution is empirical, constructed directly from the experts' responses.
-
-### Continuous criteria
-
-The user specifies a percentage variation.
-
-### Weights
-
-At each iteration, the individual FAHP-Express reference rows are resampled
-and a new set of fuzzy weights is calculated.
-
----
-
-## 8. Main Monte Carlo results
-
-The E-PROM calculates:
-
-- mean position;
-- standard deviation of position;
-- mean net Φ;
-- standard deviation of net Φ;
-- first-place frequency;
-- rank acceptability matrix;
-- PROMETHEE I outranking acceptability matrix;
-- criterion-weight distributions.
-
----
-
-## 9. Interpretation
-
-The probabilistic analysis should be used as a stability analysis, not as an
-automatic replacement for the deterministic ranking.
-
-Useful results include:
-
-- frequency with which an alternative occupies each position;
-- first-place frequency;
-- Φ dispersion;
-- weight sensitivity;
-- pairwise outranking probability.
-
----
-
-## 10. Recommended workflow
-
-1. Prepare the decision makers' evaluations.
-2. Prepare the FAHP-Express workbook using linguistic comparison terms.
-3. Configure criterion type and direction.
-4. Select the preference function.
-5. Define q and/or p.
-6. Run deterministic E-PROM.
-7. Check the ranking and PROMETHEE I relations.
-8. Run Monte Carlo/CPP.
-9. Evaluate stability and position acceptability.
-10. Export the results.
-"""
+GUIDE_PATH = ROOT / "GUIDE.md"
+GUIDE_TEXT = (
+    GUIDE_PATH.read_text(encoding="utf-8")
+    if GUIDE_PATH.exists()
+    else "GUIDE.md was not found in the package."
+)
 
 
 
@@ -1687,9 +511,7 @@ with st.sidebar:
 
         try:
 
-            preview = read_expert_workbook(
-                normalize_expert_workbook(save_uploaded(req_file))
-            )
+            preview = read_expert_workbook(save_uploaded(req_file))
 
             criteria = preview["criteria"]
             ncrit = len(criteria)
@@ -1725,11 +547,10 @@ with st.sidebar:
 
                 typ_display = st.selectbox(
                     "Data type",
-                    ["Ordinal", "Continuous"],
+                    [ORDINAL, CONTINUOUS],
                     key=f"type_{k}",
                 )
-                # Preserve the existing internal representation used by the core.
-                typ = "Ordinal" if typ_display == "Ordinal" else "Contínuo"
+                typ = typ_display
 
                 direction_name = st.selectbox(
                     "Direction",
@@ -1737,7 +558,7 @@ with st.sidebar:
                     key=f"direction_{k}",
                 )
 
-                if typ == "Ordinal":
+                if typ == ORDINAL:
 
                     scale = st.selectbox(
                         "Ordinal scale",
@@ -1777,9 +598,10 @@ with st.sidebar:
 
                     scale = 0
                     st.caption(
-                        "Continuous values are represented by a trapezoidal fuzzy number. "
-                        "na unidade original. A largura do trapezoide é definida "
-                        "pela precisão informada na planilha FAHP-Express."
+                        "Continuous values are represented by a trapezoidal fuzzy "
+                        "number in the original unit. Its width is set by the "
+                        "attribute precision given in the FAHP-Express workbook. "
+                        "Express q and p in the original unit."
                     )
 
                     pref_name = st.selectbox(
@@ -1801,8 +623,8 @@ with st.sidebar:
                             step=1.0,
                             key=f"q_{k}",
                             help=(
-                                "Diferença até q: indiferença. "
-                                "Use a unidade original do critério."
+                                "Differences up to q are treated as indifference. "
+                                "Use the criterion's original unit."
                             ),
                         )
 
@@ -1819,8 +641,8 @@ with st.sidebar:
                             step=1.0,
                             key=f"p_{k}",
                             help=(
-                                "Até p, a preferência cresce linearmente; "
-                                "a partir de p, é completa."
+                                "Preference grows linearly up to p and is "
+                                "complete from p on."
                             ),
                         )
 
@@ -1865,7 +687,7 @@ with st.sidebar:
                     "p": p,
                     "Scale": (
                         scale
-                        if typ == "Ordinal"
+                        if typ == ORDINAL
                         else "Continuous"
                     ),
                 })
@@ -1908,80 +730,14 @@ if run:
 
             data = preview
 
-            fahp_path = normalize_fahp_workbook(
+            fahp = read_fahp_workbook(
                 save_uploaded(fahp_file),
                 data["criteria"],
+                expert_names=data["expert_names"],
             )
 
-            fahp = read_fahp_workbook(
-                fahp_path,
-                n_criteria=len(
-                    data["criteria"]
-                ),
-            )
-
-            # Read precision directly from every decision-maker sheet.
-            # This produces the explicit (decision maker, criterion) matrix
-            # required by both E-PROM and Monte Carlo.
-            # This prevents an older generic reader from collapsing
-            # multiple precision rows into a single (1 x N) row.
-            fahp["precision_levels"] = read_precision_levels_from_workbook(
-                fahp_path,
-                data["criteria"],
-                data["n_experts"],
-            )
-
-            # Keep the existing computational core unchanged. The workbook
-            # reader may expose precision as (criteria, decision makers),
-            # while run_e_prom expects (decision makers, criteria).
-            fahp = normalize_precision_levels_shape(
-                fahp,
-                n_experts=data["n_experts"],
-                n_criteria=data["n_criteria"],
-            )
-
-            # The legacy reader may collapse w_fuzzy_individual to the first
-            # expert when multiple FAHP sheets are present. Rebuild only this
-            # input tensor by invoking the same unchanged reader once per
-            # decision-maker sheet.
-            fahp["w_fuzzy_individual"] = rebuild_individual_fahp_weights(
-                fahp_path,
-                n_criteria=data["n_criteria"],
-                n_experts=data["n_experts"],
-                canonical_criteria=data["criteria"],
-            )
-
-            # Rebuild the displayed/group fuzzy weights from all decision
-            # makers. The legacy reader's w_fuzzy_group can contain only the
-            # first expert when multiple FAHP sheets are present. Keep the
-            # computational core unchanged: run_e_prom continues to consume
-            # w_fuzzy_individual below.
-            individual_w = np.asarray(
-                fahp["w_fuzzy_individual"],
-                dtype=float,
-            )
-            expected_w_shape = (
-                data["n_criteria"],
-                4,
-                data["n_experts"],
-            )
-            if individual_w.shape != expected_w_shape:
-                raise ValueError(
-                    "Individual FAHP fuzzy weights have dimension "
-                    f"{individual_w.shape}; expected {expected_w_shape}."
-                )
-
-            fahp["w_fuzzy_group"] = np.mean(
-                individual_w,
-                axis=2,
-            )
-
-            # Use the actual workbook tab names (e.g. IGOR, LUMA) throughout
-            # the application instead of generic "Decision maker N" labels.
-            fahp["expert_names"] = get_fahp_decision_maker_names(
-                fahp_path,
-                data["n_experts"],
-            )
+            for message in fahp.get("warnings", []):
+                st.warning(message)
 
             result = run_e_prom(
                 data["evaluations"],
@@ -1992,7 +748,7 @@ if run:
                 qs,
                 ps,
                 scales,
-                precision_levels=fahp.get("precision_levels"),
+                precision_levels=fahp["precision_levels"],
             )
 
             ranking = result_df(
@@ -2000,16 +756,7 @@ if run:
                 result,
             )
 
-            export_config = config.rename(columns={
-                "Criterio": "Criterion",
-                "Critério": "Criterion",
-                "Tipo": "Type",
-                "Direção": "Direction",
-                "Função": "Preference",
-                "q": "q",
-                "p": "p",
-                "Escala": "Scale",
-            }).copy()
+            export_config = config.copy()
             xlsx = excel_bytes(
                 data,
                 result,
@@ -2020,7 +767,14 @@ if run:
         st.session_state.update(
             data=data,
             fahp=fahp,
-            fahp_path=fahp_path,
+            run_params=dict(
+                types=list(types),
+                dirs=list(dirs),
+                prefs=list(prefs),
+                qs=list(qs),
+                ps=list(ps),
+                scales=list(scales),
+            ),
             result=result,
             config=config,
             ranking=ranking,
@@ -2044,7 +798,7 @@ if "result" in st.session_state:
 
     data = st.session_state["data"]
     fahp = st.session_state["fahp"]
-    fahp_path = st.session_state.get("fahp_path")
+    run_params = st.session_state["run_params"]
     result = st.session_state["result"]
     config = st.session_state["config"]
     ranking = st.session_state["ranking"]
@@ -2073,7 +827,7 @@ if "result" in st.session_state:
             "🏆 Ranking",
             "📈 PROMETHEE",
             "👥 Decision Makers",
-            "🎲 CPP / Monte Carlo",
+            "🎲 Monte Carlo",
             "📘 Guide",
         ]
     )
@@ -2116,7 +870,7 @@ if "result" in st.session_state:
         st.subheader("Attribute precision")
         precision_matrix = fahp.get(
             "precision_levels",
-            [["Alta"] * len(data["criteria"]) for _ in fahp.get("expert_names", [])],
+            [["High"] * len(data["criteria"]) for _ in fahp.get("expert_names", [])],
         )
         # Keep the exported precision table dimensionally consistent.
         precision_rows = len(precision_matrix)
@@ -2204,7 +958,7 @@ if "result" in st.session_state:
 
     with tab4:
 
-        st.subheader("CPP / Monte Carlo — E-PROM stability")
+        st.subheader("Monte Carlo — E-PROM stability")
 
         st.markdown(
             "For **ordinal criteria**, uncertainty is obtained empirically "
@@ -2218,8 +972,8 @@ if "result" in st.session_state:
         )
 
         continuous_idx = [
-            i for i, typ in enumerate(config["Type"])
-            if typ == "Continuous"
+            i for i, typ in enumerate(run_params["types"])
+            if typ == CONTINUOUS
         ]
 
         variation = []
@@ -2239,6 +993,27 @@ if "result" in st.session_state:
                 )
             else:
                 variation.append(0.0)
+
+        weight_mode_label = st.selectbox(
+            "Weight sampling",
+            [
+                "Bootstrap decision makers (recommended)",
+                "Independent per criterion (legacy)",
+            ],
+            key="mc_weight_mode",
+            help=(
+                "Recommended: each simulation resamples whole FAHP-Express "
+                "rows of the decision makers, which stays consistent when they "
+                "use different reference criteria. Legacy: every criterion "
+                "draws its own value; only valid when all decision makers "
+                "share the same reference criterion."
+            ),
+        )
+        weight_mode = (
+            "dm_bootstrap"
+            if weight_mode_label.startswith("Bootstrap")
+            else "independent"
+        )
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -2265,107 +1040,31 @@ if "result" in st.session_state:
             )
 
         if st.button(
-            "▶ Run CPP / Monte Carlo",
+            "▶ Run Monte Carlo",
             type="primary",
             key="run_mc",
         ):
 
-            # Recover each decision maker's own FAHP-Express reference
-            # directly from the normalized workbook, then map it back to the
-            # canonical criterion order required by Monte Carlo.
-            if not fahp_path or not Path(fahp_path).exists():
-                raise ValueError(
-                    "The normalized FAHP-Express workbook is no longer "
-                    "available for Monte Carlo. Please re-run E-PROM with "
-                    "the FAHP-Express workbook loaded."
-                )
-
-            reference_rows = read_mc_reference_rows_from_workbook(
-                fahp_path,
-                data["criteria"],
-                data["n_experts"],
-            )
-
-            # Keep the compatibility interface used below: the Monte Carlo
-            # boundary receives a list of candidate reference matrices.
-            # There is only one valid reference matrix here because it was
-            # reconstructed explicitly for every decision maker.
-            reference_candidates = [reference_rows]
-
-            fahp = normalize_precision_levels_shape(
-                fahp,
-                n_experts=data["n_experts"],
-                n_criteria=data["n_criteria"],
-            )
-
-            # Monte Carlo compatibility boundary.
-            #
-            # The FAHP workbook is stored canonically as:
-            #     (n_experts, n_criteria)
-            #
-            # Different historical Monte Carlo implementations used either
-            # this orientation or its transpose. The computational algorithm
-            # is not changed here: we only adapt the input representation.
-            precision_arr = np.asarray(
-                fahp["precision_levels"],
-                dtype=object,
-            )
-            expected_shape = (
-                data["n_experts"],
-                data["n_criteria"],
-            )
-            transposed_shape = (
-                data["n_criteria"],
-                data["n_experts"],
-            )
-
-            if precision_arr.shape != expected_shape:
-                raise ValueError(
-                    "Internal precision matrix has dimension "
-                    f"{precision_arr.shape}; expected {expected_shape}."
-                )
-
-            # The legacy Monte Carlo core expects precision levels in
-            # criterion × decision-maker orientation, while reference_rows
-            # remains decision-maker × criterion. This is the contract used by
-            # the previously working v20 integration.
-            mc = None
-            mc_errors = []
-
-            for candidate_precision in (
-                precision_arr.T,
-                precision_arr,
-            ):
-                try:
+            try:
+                with st.spinner("Running Monte Carlo..."):
                     mc = run_e_prom_monte_carlo(
                         data["evaluations"],
-                        reference_candidates[0],
-                        types,
-                        dirs,
-                        prefs,
-                        qs,
-                        ps,
-                        scales,
+                        fahp["reference_rows"],
+                        run_params["types"],
+                        run_params["dirs"],
+                        run_params["prefs"],
+                        run_params["qs"],
+                        run_params["ps"],
+                        run_params["scales"],
                         variation,
                         n_mc=int(n_mc),
                         seed=int(seed),
-                        precision_levels=candidate_precision.tolist(),
+                        precision_levels=fahp["precision_levels"],
+                        weight_sampling=weight_mode,
                     )
-                    break
-                except (ValueError, TypeError, IndexError) as exc:
-                    mc_errors.append(str(exc))
-
-            if mc is None:
-                detail = (
-                    mc_errors[-1]
-                    if mc_errors
-                    else "unknown Monte Carlo input error"
-                )
-                raise ValueError(
-                    "Monte Carlo could not accept the FAHP-Express inputs. "
-                    f"Precision shapes tried: {expected_shape} and "
-                    f"{transposed_shape}. Last error: {detail}"
-                )
+            except Exception as exc:
+                st.error(f"Monte Carlo failed: {exc}")
+                st.stop()
 
             st.session_state["mc"] = mc
 
@@ -2416,7 +1115,7 @@ if "result" in st.session_state:
                     "Mean Phi": mc["mean_phi"],
                     "Phi SD": mc["std_phi"],
                 }).to_csv(index=False).encode("utf-8-sig"),
-                file_name="E_PROM_CPP_MonteCarlo.csv",
+                file_name="E_PROM_MonteCarlo.csv",
                 mime="text/csv",
             )
 

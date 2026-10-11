@@ -1,2 +1,5 @@
-E-PROM v7.3 — precisão individual por especialista e critério
-Esta versão NÃO exige precisão igual entre abas do FAHP-Express.
+E-PROM v7.4 — fixes and English release
+- Fixed: Monte Carlo precision matrix orientation, PROMETHEE I relations, blank precision cells, 9-point fuzzy scale (level 5).
+- Monte Carlo: weights bootstrapped by decision maker; ties share rank credit; vectorized (much faster).
+- Decision makers are paired by sheet name across the two workbooks.
+- Core, app, templates and guide are in English; Portuguese workbooks are still accepted.

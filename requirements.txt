@@ -3,6 +3,3 @@ pandas
 numpy
 openpyxl
 plotly
-scikit-learn
-matplotlib
-reportlab

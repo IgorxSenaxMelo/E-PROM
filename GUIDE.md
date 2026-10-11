@@ -34,11 +34,11 @@ quantity fuzzy, aggregates the DMs' flows, and defuzzifies only at the very end.
 | Sheet | Content |
 |---|---|
 | One sheet per DM (sheet name = DM name) | Column A: alternative ID · Column B: description · Column C onward: criteria |
-| **Last sheet: `Guide`** | Support sheet. **The last sheet is always ignored**, so keep it even if empty. If it is missing, the last DM sheet is dropped. |
+| Sheets named `Guide`, `_Lists` or `Instructions` | Support sheets, ignored by the app. Every other sheet is read as a decision maker. |
 
 Rules:
 
-- All DMs must use the same alternative IDs and the same criterion names. The *order* of the criteria may differ between sheets (they are aligned by name).
+- All DMs must use the same alternative IDs and the same criterion names. The *order* of rows and criteria may differ between sheets (they are aligned by ID and by name; names ignore case and accents).
 - Ordinal criteria: integers inside the scale you select (**5, 7 or 9** — a 1–10 scale is not supported).
 - Continuous criteria: any real number, in the original unit (cost in R$, schedule or time in months, distance, consumption, physical performance, ...). Values are never converted to a 1–7 scale.
 - No empty cells.
@@ -56,9 +56,9 @@ One sheet per DM, plus the ignored `Guide` / `_Lists` sheets. Each DM sheet has:
 |---|---|
 | `Criteria` | The criterion names (same names as the evaluation workbook). **The first criterion is that DM's reference criterion.** |
 | `Comparison with reference` | For every criterion, how many times more important the reference is than that criterion (linguistic term, see §5). The reference itself is *Equal importance*. |
-| `Attribute precision` | `High`, `Medium` or `Low` for every criterion (see §4). Fill every cell. |
+| `Attribute precision` | `High`, `Medium` or `Low` for every criterion (see §4). A blank cell is treated as `High`. |
 
-The reference row starts at cell **B4**, and it must contain exactly as many criteria as the evaluation workbook. Comparison values can be linguistic terms (English or Portuguese) or the numbers 1–9; precision labels also accept the Portuguese forms `Alta`, `Média`, `Baixa`. The numeric fuzzy parameters of each precision level are fixed internally — you only choose the label.
+The sheets must have the same names as in the evaluation workbook: decision makers are paired **by sheet name** (if the names differ, they are paired by position and the app shows a warning). The criteria must be the same as in the evaluation workbook. Comparison values can be linguistic terms (English or Portuguese) or the numbers 1–9; precision labels also accept the Portuguese forms `Alta`, `Média`, `Baixa`. The numeric fuzzy parameters of each precision level are fixed internally — you only choose the label.
 
 Each DM may choose a **different reference criterion**. The reference should be the criterion that DM considers most important, so every other factor is ≥ 1.
 
@@ -325,7 +325,7 @@ output is the probability of each ranking outcome.
 |---|---|
 | **Ordinal evaluation** (per alternative × criterion × DM) | **Empirical distribution** — one of the answers given by the DMs for that alternative and criterion, drawn with its observed frequency. Example: answers `7, 7, 6, 5, 7, 6, 7, 4, 7, 6` → P(7)=0.5, P(6)=0.3, P(5)=0.1, P(4)=0.1. |
 | **Continuous evaluation** | **Uniform** in `[x(1−v), x(1+v)]`, where `v` is the % variation you set per criterion (e.g. 20 % → `[0.8x, 1.2x]`). |
-| **Criterion weights** | The FAHP-Express comparison value of each criterion is drawn from the DMs' values for that criterion, and fuzzy weights are recomputed. The same weight vector is used for all DMs in that iteration. |
+| **Criterion weights** | Each iteration **bootstraps the decision makers**: it draws, with replacement, as many DMs as there are in the panel, takes their complete FAHP-Express rows, and averages their fuzzy weights. Whole rows are resampled, so it stays consistent when DMs use different reference criteria. The same weight vector is used for all DMs in that iteration. With very few DMs (e.g. 2) there are only a few distinct weight combinations, so the weight variability is limited. A legacy mode (each criterion draws its own value) is available; use it only if every DM has the same reference criterion. |
 | **Precision** | Unchanged; each DM keeps their own precision for the fuzzification. |
 
 Then, in each iteration: fuzzy PROMETHEE per DM → average of the fuzzy flows → COA → ranking.
@@ -337,9 +337,9 @@ Then, in each iteration: fuzzy PROMETHEE per DM → average of the fuzzy flows �
 | Output | How to read it |
 |---|---|
 | **Mean position / SD of position** | Average rank over the simulations and its dispersion. Small SD = stable position. |
-| **First-place frequency** | % of simulations in which the alternative is ranked 1st. |
+| **First-place frequency** | % of simulations in which the alternative is ranked 1st (ties for 1st share the credit). |
 | **Mean Φ / SD of Φ** | Average net flow and its dispersion. |
-| **Rank acceptability matrix** | % of simulations in which alternative *i* ends in position *r*. Each row sums to 100 %. |
+| **Rank acceptability matrix** | % of simulations in which alternative *i* ends in position *r*. Each row sums to 100 %. Alternatives tied in a simulation share the tied positions equally. |
 | **Outranking acceptability (PROMETHEE I)** | % of simulations in which *i* outranks *j* (P relation). |
 | **Weight distribution** | Mean, SD, min and max of each criterion's crisp weight across simulations. |
 
@@ -358,6 +358,8 @@ Use ≥ 1000 for exploration and ≥ 5000 for results you will report. The seed 
 ---
 
 E-PROM is domain-generic: it has no `KEY` classification and no military-domain groups (those belong to SIPREM). It produces a ranking and PROMETHEE I relations.
+
+Templates: `E_PROM_Evaluations_Template.xlsx` and `E_PROM_FAHP_Express_Template.xlsx` (downloadable inside the app). English and Portuguese labels are both accepted in the workbooks.
 
 ---
 
