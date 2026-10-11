@@ -1,82 +1,88 @@
-"""Fuzzy PROMETHEE para o E-PROM."""
+"""Fuzzy PROMETHEE for E-PROM."""
 
 from __future__ import annotations
-import math
 import numpy as np
 
-from .fuzzy_numbers import (
-    trap_add,
-    trap_sub,
-    trap_scalar_div,
-    trap_mul_geldermann,
-    defuzz_coa,
-)
+from .fuzzy_numbers import defuzz_coa
+
+# Preference-function codes:
+# 1 = Usual, 2 = U-shape, 3 = V-shape, 4 = Level, 5 = Linear
+
+TIE_TOL = 1e-12
 
 
-# Codes:
-# 1 = Usual
-# 2 = U-shape
-# 3 = V-shape
-# 4 = Level
-# 5 = Linear
+def _check_thresholds(pref_type, q, p):
+    if pref_type == 3 and p <= 0:
+        raise ValueError("V-shape requires p > 0.")
+    if pref_type in (4, 5) and p <= q:
+        raise ValueError(
+            "Level requires p > q." if pref_type == 4 else "Linear requires p > q."
+        )
+    if pref_type not in (1, 2, 3, 4, 5):
+        raise ValueError(f"Preference function not implemented: {pref_type}")
 
 
-def pref_scalar(d, pref_type, q=0.0, p=0.0):
-    """PROMETHEE preference function applied to a non-negative difference."""
-    d = max(0.0, float(d))
+def pref_array(d, pref_type, q=0.0, p=0.0):
+    """PROMETHEE preference function applied element-wise to differences."""
+    d = np.maximum(np.asarray(d, dtype=float), 0.0)
     q = float(q)
     p = float(p)
+    pref_type = int(pref_type)
+    _check_thresholds(pref_type, q, p)
 
-    if pref_type == 1:  # Usual
-        return float(d > 0)
-
-    if pref_type == 2:  # U-shape
-        if d <= q:
-            return 0.0
-        return 1.0
-
-    if pref_type == 3:  # V-shape
-        if d <= 0:
-            return 0.0
-        if p <= 0:
-            raise ValueError("V-shape requer p > 0.")
-        if d < p:
-            return d / p
-        return 1.0
-
-    if pref_type == 4:  # Level
-        if d <= q:
-            return 0.0
-        if d <= p:
-            return 0.5
-        return 1.0
-
-    if pref_type == 5:  # Linear
-        if d <= q:
-            return 0.0
-        if p <= q:
-            raise ValueError("Linear requer p > q.")
-        if d < p:
-            return (d - q) / (p - q)
-        return 1.0
-
-    raise ValueError(
-        f"Tipo de preferência não implementado: {pref_type}"
+    if pref_type == 1:                       # Usual
+        return (d > 0).astype(float)
+    if pref_type == 2:                       # U-shape
+        return (d > q).astype(float)
+    if pref_type == 3:                       # V-shape
+        return np.where(d <= 0, 0.0, np.where(d < p, d / p, 1.0))
+    if pref_type == 4:                       # Level
+        return np.where(d <= q, 0.0, np.where(d <= p, 0.5, 1.0))
+    # Linear
+    return np.where(
+        d <= q, 0.0, np.where(d < p, (d - q) / (p - q), 1.0)
     )
 
 
-def pref_trap(D, pref_type, q=0.0, p=0.0):
-    """
-    Apply a PROMETHEE scalar preference function to the four
-    endpoints of a fuzzy difference.
-    """
-    D = np.asarray(D, dtype=float).reshape(4)
-    out = np.array([
-        pref_scalar(x, pref_type, q, p)
-        for x in D
-    ], dtype=float)
+def pref_scalar(d, pref_type, q=0.0, p=0.0):
+    """Scalar version of :func:`pref_array`."""
+    return float(pref_array(d, pref_type, q, p))
 
-    return np.sort(out)
+
+def pref_trap(D, pref_type, q=0.0, p=0.0):
+    """Apply a (non-decreasing) preference function to the four corners of D."""
+    D = np.asarray(D, dtype=float).reshape(4)
+    return np.sort(pref_array(D, pref_type, q, p))
+
+
+def _mul_geldermann_vec(W, P):
+    """Vectorized Geldermann product: W is [4], P is [..., 4]."""
+    ml1, mu1 = W[1], W[2]
+    alpha1 = W[1] - W[0]
+    beta1 = W[3] - W[2]
+
+    ml2, mu2 = P[..., 1], P[..., 2]
+    alpha2 = P[..., 1] - P[..., 0]
+    beta2 = P[..., 3] - P[..., 2]
+
+    ml = ml1 * ml2
+    mu = mu1 * mu2
+    alpha = np.maximum(ml1 * alpha2 + ml2 * alpha1 - alpha1 * alpha2, 0.0)
+    beta = np.maximum(mu1 * beta2 + mu2 * beta1 + beta1 * beta2, 0.0)
+
+    C = np.stack([ml - alpha, ml, mu, mu + beta], axis=-1)
+    C = np.where(C < 0, 0.0, C)
+    return np.sort(C, axis=-1)
+
+
+def _sub_vec(X, Y):
+    """Interval subtraction X - Y for arrays shaped [..., 4]."""
+    return np.stack([
+        X[..., 0] - Y[..., 3],
+        X[..., 1] - Y[..., 2],
+        X[..., 2] - Y[..., 1],
+        X[..., 3] - Y[..., 0],
+    ], axis=-1)
 
 
 def run_fuzzy_promethee_trap(
@@ -92,174 +98,118 @@ def run_fuzzy_promethee_trap(
     F: [alternative, criterion, 4] fuzzy evaluations.
     w_fuzzy: [criterion, 4] fuzzy criterion weights.
 
-    Fuzzy weights are directly propagated into Fuzzy PROMETHEE:
-        fuzzy weight ⊗ fuzzy preference
+    Fuzzy weights are propagated directly into Fuzzy PROMETHEE:
+        fuzzy weight (x) fuzzy preference
     and defuzzification occurs only at the flow level.
     """
     F = np.asarray(F, dtype=float)
     w_fuzzy = np.asarray(w_fuzzy, dtype=float)
 
-    n_req, n_crit, n_comp = F.shape
-
-    if n_comp != 4:
+    if F.ndim != 3 or F.shape[2] != 4:
         raise ValueError(
-            "F deve conter números fuzzy trapezoidais [a,b,c,d]."
+            "F must contain trapezoidal fuzzy numbers [a, b, c, d]."
         )
+
+    n_req, n_crit, _ = F.shape
+
+    if n_req < 2:
+        raise ValueError("At least two alternatives are required.")
 
     if w_fuzzy.shape != (n_crit, 4):
         raise ValueError(
-            f"Pesos fuzzy devem possuir dimensão [{n_crit},4]."
+            f"Fuzzy weights must have shape [{n_crit}, 4]."
         )
 
-    PI = np.zeros(
-        (n_req, n_req, 4),
-        dtype=float,
-    )
+    PI = np.zeros((n_req, n_req, 4), dtype=float)
 
-    for i in range(n_req):
+    for k in range(n_crit):
+        Ai = F[:, k, :][:, None, :]
+        Bj = F[:, k, :][None, :, :]
 
-        for j in range(n_req):
+        if crit_dir[k] == 1:
+            D = _sub_vec(Ai, Bj)
+        else:
+            D = _sub_vec(Bj, Ai)
 
-            if i == j:
-                continue
+        Pk = np.sort(
+            pref_array(D, int(pref_types[k]), float(q_vals[k]), float(p_vals[k])),
+            axis=-1,
+        )
+        PI += _mul_geldermann_vec(w_fuzzy[k], Pk)
 
-            pi_ij = np.zeros(4, dtype=float)
+    idx = np.arange(n_req)
+    PI[idx, idx, :] = 0.0
 
-            for k in range(n_crit):
-
-                Ai = F[i, k]
-                Bj = F[j, k]
-
-                if crit_dir[k] == 1:
-                    D = trap_sub(Ai, Bj)
-                else:
-                    D = trap_sub(Bj, Ai)
-
-                Pk = pref_trap(
-                    D,
-                    int(pref_types[k]),
-                    float(q_vals[k]),
-                    float(p_vals[k]),
-                )
-
-                term = trap_mul_geldermann(
-                    w_fuzzy[k],
-                    Pk,
-                )
-
-                pi_ij = trap_add(
-                    pi_ij,
-                    term,
-                )
-
-            PI[i, j] = pi_ij
-
-    phi_plus_fuzzy = np.zeros(
-        (n_req, 4)
-    )
-    phi_minus_fuzzy = np.zeros(
-        (n_req, 4)
-    )
-    phi_net_fuzzy = np.zeros(
-        (n_req, 4)
-    )
+    avg_p = PI.sum(axis=1) / (n_req - 1)
+    avg_m = PI.sum(axis=0) / (n_req - 1)
+    net_f = _sub_vec(avg_p, avg_m)
 
     phi_plus = np.zeros(n_req)
     phi_minus = np.zeros(n_req)
     phi_net = np.zeros(n_req)
 
-    for i in range(n_req):
-
-        sum_p = np.zeros(4)
-        sum_m = np.zeros(4)
-
-        for j in range(n_req):
-
-            if i == j:
-                continue
-
-            sum_p = trap_add(
-                sum_p,
-                PI[i, j],
-            )
-
-            sum_m = trap_add(
-                sum_m,
-                PI[j, i],
-            )
-
-        avg_p = trap_scalar_div(
-            sum_p,
-            n_req - 1,
-        )
-
-        avg_m = trap_scalar_div(
-            sum_m,
-            n_req - 1,
-        )
-
-        net_f = trap_sub(
-            avg_p,
-            avg_m,
-        )
-
-        phi_plus_fuzzy[i] = avg_p
-        phi_minus_fuzzy[i] = avg_m
-        phi_net_fuzzy[i] = net_f
-
-        if defuzzify:
-            phi_plus[i] = defuzz_coa(avg_p)
-            phi_minus[i] = defuzz_coa(avg_m)
-            phi_net[i] = defuzz_coa(net_f)
+    if defuzzify:
+        for i in range(n_req):
+            phi_plus[i] = defuzz_coa(avg_p[i])
+            phi_minus[i] = defuzz_coa(avg_m[i])
+            phi_net[i] = defuzz_coa(net_f[i])
 
     return (
         phi_plus,
         phi_minus,
         phi_net,
-        phi_plus_fuzzy,
-        phi_minus_fuzzy,
-        phi_net_fuzzy,
+        avg_p,
+        avg_m,
+        net_f,
     )
 
 
-def rankdata_average(values):
+def rankdata_average(values, tol=TIE_TOL):
+    """Average ranks (1 = smallest). Values within ``tol`` are tied."""
     x = np.asarray(values, dtype=float)
-
-    order = np.argsort(
-        x,
-        kind="mergesort",
-    )
-
-    ranks = np.empty(
-        len(x),
-        dtype=float,
-    )
+    order = np.argsort(x, kind="mergesort")
+    ranks = np.empty(len(x), dtype=float)
 
     i = 0
-
     while i < len(x):
-
         j = i
-
-        while (
-            j + 1 < len(x)
-            and x[order[j + 1]] == x[order[i]]
-        ):
+        while j + 1 < len(x) and x[order[j + 1]] - x[order[j]] <= tol:
             j += 1
-
-        ranks[order[i:j + 1]] = (
-            (i + 1 + j + 1) / 2
-        )
-
+        ranks[order[i:j + 1]] = (i + 1 + j + 1) / 2
         i = j + 1
 
     return ranks
 
 
 def rank_from_net_flow(phi_net):
-    """Rank 1 = highest net flow."""
-    return (
-        len(phi_net)
-        + 1
-        - rankdata_average(phi_net)
-    )
+    """Rank 1 = highest net flow; ties share the average rank."""
+    return len(phi_net) + 1 - rankdata_average(phi_net)
+
+
+def promethee_i_relation(plus_i, minus_i, plus_j, minus_j, tol=1e-10):
+    """PROMETHEE I relation of i with respect to j: 'P', 'P-', 'I' or 'R'.
+
+    i P j  iff  phi+(i) >= phi+(j) and phi-(i) <= phi-(j), with at least one
+    strict inequality.
+    """
+    not_worse_plus = plus_i >= plus_j - tol
+    not_worse_minus = minus_i <= minus_j + tol
+    strictly_better = (plus_i > plus_j + tol) or (minus_i < minus_j - tol)
+
+    if not_worse_plus and not_worse_minus and strictly_better:
+        return "P"
+
+    not_better_plus = plus_i <= plus_j + tol
+    not_better_minus = minus_i >= minus_j - tol
+    strictly_worse = (plus_i < plus_j - tol) or (minus_i > minus_j + tol)
+
+    if not_better_plus and not_better_minus and strictly_worse:
+        return "P-"
+
+    if (
+        abs(plus_i - plus_j) <= tol
+        and abs(minus_i - minus_j) <= tol
+    ):
+        return "I"
+
+    return "R"

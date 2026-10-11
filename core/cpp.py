@@ -1,6 +1,9 @@
-"""CPP — Composition of Probabilistic Preferences.
+"""Experimental: probability of being best under normally distributed scores.
 
-Módulo independente do E-PROM principal para critérios contínuos.
+NOT used by the E-PROM application and NOT the full CPP (Composition of
+Probabilistic Preferences) method: it only estimates, by simulation, how often
+each alternative has the highest weighted min-max-normalized score. It is kept
+as a stand-alone utility.
 """
 
 from __future__ import annotations
@@ -16,25 +19,25 @@ def cpp_normal(
     weights=None,
 ):
     """
-    X: [alternativas, critérios] — médias/valores centrais.
-    S: [alternativas, critérios] — desvios-padrão.
-    directions: +1 maximiza, -1 minimiza.
+    X: [alternatives, criteria] — means / central values.
+    S: [alternatives, criteria] — standard deviations.
+    directions: +1 maximize, -1 minimize.
     """
     X = np.asarray(X, dtype=float)
     S = np.asarray(S, dtype=float)
     directions = np.asarray(directions, dtype=int)
 
     if X.shape != S.shape:
-        raise ValueError("X e S devem possuir a mesma dimensão.")
+        raise ValueError("X and S must have the same shape.")
 
     if X.ndim != 2:
-        raise ValueError("X e S devem ser matrizes 2D.")
+        raise ValueError("X and S must be 2-D matrices.")
 
     if len(directions) != X.shape[1]:
-        raise ValueError("Número de direções incompatível.")
+        raise ValueError("Number of directions is incompatible.")
 
     if np.any(S < 0):
-        raise ValueError("Desvios-padrão não podem ser negativos.")
+        raise ValueError("Standard deviations cannot be negative.")
 
     rng = np.random.default_rng(seed)
 
@@ -45,15 +48,12 @@ def cpp_normal(
     else:
         weights = np.asarray(weights, dtype=float)
         if len(weights) != n_crit:
-            raise ValueError("Pesos incompatíveis com os critérios.")
+            raise ValueError("Weights do not match the criteria.")
         if np.any(weights < 0) or weights.sum() <= 0:
-            raise ValueError("Pesos inválidos.")
+            raise ValueError("Invalid weights.")
         weights = weights / weights.sum()
 
-    samples = np.empty(
-        (int(nsim), n_alt, n_crit),
-        dtype=float,
-    )
+    samples = np.empty((int(nsim), n_alt, n_crit), dtype=float)
 
     for k in range(n_crit):
         samples[:, :, k] = rng.normal(
@@ -64,8 +64,6 @@ def cpp_normal(
 
     oriented = samples * directions[None, None, :]
 
-    # For each simulation, rank alternatives by the weighted
-    # normalized oriented performance.
     mins = oriented.min(axis=1, keepdims=True)
     maxs = oriented.max(axis=1, keepdims=True)
     span = maxs - mins
@@ -77,38 +75,16 @@ def cpp_normal(
         where=span > 1e-15,
     )
 
-    scores = np.sum(
-        norm * weights[None, None, :],
-        axis=2,
-    )
+    scores = np.sum(norm * weights[None, None, :], axis=2)
+    winners = np.argmax(scores, axis=1)
 
-    winners = np.argmax(
-        scores,
-        axis=1,
-    )
-
-    prob_best = np.bincount(
-        winners,
-        minlength=n_alt,
-    ) / float(nsim)
+    prob_best = np.bincount(winners, minlength=n_alt) / float(nsim)
 
     score = prob_best.copy()
+    rank_order = np.argsort(-score, kind="mergesort")
 
-    rank_order = np.argsort(
-        -score,
-        kind="mergesort",
-    )
-
-    rank = np.empty(
-        n_alt,
-        dtype=int,
-    )
-
+    rank = np.empty(n_alt, dtype=int)
     for r, idx in enumerate(rank_order, start=1):
         rank[idx] = r
 
-    return {
-        "score": score,
-        "rank": rank,
-        "prob_best": prob_best,
-    }
+    return {"score": score, "rank": rank, "prob_best": prob_best}

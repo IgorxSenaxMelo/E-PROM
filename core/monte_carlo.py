@@ -1,50 +1,72 @@
-"""Monte Carlo do E-PROM.
+"""Monte Carlo stability analysis for E-PROM.
 
-Ordinal:
-    amostragem empírica das respostas dos especialistas, como no MC-SIPREM.
+Ordinal criteria:
+    empirical sampling of the decision makers' answers (as in MC-SIPREM).
 
-Contínuo:
-    perturbação uniforme do valor observado em cada especialista:
-    x_MC ~ U[x(1-v), x(1+v)], onde v é informado em porcentagem.
+Continuous criteria:
+    uniform perturbation of each observed value:
+    x_MC ~ U[x(1-v), x(1+v)], where v is given in percent.
 
-Os pesos são reamostrados empiricamente a partir das respostas FAHP-Express
-dos especialistas em cada iteração, mantendo a lógica do MC-SIPREM.
+Criterion weights:
+    each iteration bootstraps the decision makers' FAHP-Express answers
+    (whole reference rows, so the DMs' different reference criteria stay
+    consistent) and recomputes the fuzzy weights.
 """
 
 from __future__ import annotations
 import numpy as np
 
-from .e_prom_core import build_fuzzy_matrix
+from .e_prom_core import (
+    _validate_preferences,
+    build_fuzzy_matrix,
+    normalize_precision_matrix,
+)
+from .fahp import (
+    calc_fahp_buckley,
+    crisp_to_fuzzy_trap_interp,
+    weights_from_reference_row,
+)
 from .fuzzy_numbers import defuzz_coa
-from .fahp import crisp_to_fuzzy_trap_interp, calc_fahp_buckley
-from .promethee import run_fuzzy_promethee_trap, rank_from_net_flow
+from .labels import CONTINUOUS, ORDINAL, normalize_type
+from .promethee import TIE_TOL, rank_from_net_flow, run_fuzzy_promethee_trap
+
+WEIGHT_SAMPLING_MODES = ("dm_bootstrap", "independent")
 
 
-def _empirical_sample(values, rng):
-    values = np.asarray(values)
-    unique, counts = np.unique(values, return_counts=True)
-    prob = counts / counts.sum()
-    return unique[rng.choice(len(unique), p=prob)]
+def _independent_weights(rows, rng):
+    """Legacy sampling: every criterion draws its value from a random DM.
 
-
-def _sample_fahp_weights(reference_rows, rng):
-    rows = np.asarray(reference_rows, dtype=float)
+    Only consistent when all DMs use the same reference criterion.
+    """
     n_exp, n_crit = rows.shape
-
-    sampled = np.array([
-        _empirical_sample(rows[:, k], rng)
-        for k in range(n_crit)
-    ])
+    picks = rng.integers(0, n_exp, size=n_crit)
+    sampled = rows[picks, np.arange(n_crit)]
 
     A = sampled[None, :] / sampled[:, None]
-
     M = np.zeros((n_crit, n_crit, 4))
     for i in range(n_crit):
         for j in range(n_crit):
             M[i, j] = crisp_to_fuzzy_trap_interp(A[i, j])
+    return calc_fahp_buckley(M)
 
-    w_crisp, w_fuzzy = calc_fahp_buckley(M)
-    return w_crisp, w_fuzzy
+
+def _add_rank_shares(phi, acc, tol=TIE_TOL):
+    """Add one iteration to the rank-position counts.
+
+    Tied alternatives split their share evenly over the tied positions, so
+    every row of ``acc`` keeps summing to the number of iterations.
+    """
+    order = np.argsort(-phi, kind="mergesort")
+    n = len(phi)
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and abs(phi[order[j + 1]] - phi[order[j]]) <= tol:
+            j += 1
+        share = 1.0 / (j - i + 1)
+        for idx in order[i:j + 1]:
+            acc[idx, i:j + 1] += share
+        i = j + 1
 
 
 def run_e_prom_monte_carlo(
@@ -62,128 +84,104 @@ def run_e_prom_monte_carlo(
     precision_levels=None,
     precision_support_pct=None,
     precision_core_pct=None,
+    weight_sampling="dm_bootstrap",
 ):
-    """
-    Retorna uma análise de estabilidade do E-PROM.
+    """Stability analysis of E-PROM.
 
-    Para cada iteração:
-      1. Reamostra os pesos FAHP-Express empiricamente;
-      2. Para cada especialista:
-         - ordinal: sorteia uma resposta observada entre os especialistas;
-         - contínuo: perturba o valor observado em ±v%;
-      3. Executa Fuzzy PROMETHEE individual;
-      4. Agrega os fluxos dos especialistas a posteriori;
-      5. Registra ranking, phi e matriz de aceitabilidade.
+    For every iteration:
+      1. resample the criterion weights (see ``weight_sampling``);
+      2. for every decision maker:
+         - ordinal: draw one of the answers observed for that
+           alternative/criterion across decision makers;
+         - continuous: perturb the observed value by +-v %;
+      3. run individual Fuzzy PROMETHEE;
+      4. aggregate the fuzzy flows of the decision makers;
+      5. defuzzify, rank and accumulate the statistics.
 
-    Não há classificação KEY nem K-means: o E-PROM permanece genérico.
+    ``precision_levels`` must have shape (decision makers, criteria).
     """
+    if weight_sampling not in WEIGHT_SAMPLING_MODES:
+        raise ValueError(
+            f"weight_sampling must be one of {WEIGHT_SAMPLING_MODES}."
+        )
+
     rng = np.random.default_rng(seed)
 
     experts = list(evaluations.keys())
     n_exp = len(experts)
-    n_req, n_crit = np.asarray(evaluations[experts[0]]).shape
+    stack = np.stack(
+        [np.asarray(evaluations[name], dtype=float) for name in experts]
+    )                                                    # [DM, alt, crit]
+    _, n_req, n_crit = stack.shape
 
-    variation = np.asarray(
-        continuous_variation_pct,
-        dtype=float,
-    )
+    types = [normalize_type(t) for t in types]
+    _validate_preferences(types, preference_types, q_vals, p_vals)
+
+    variation = np.asarray(continuous_variation_pct, dtype=float)
     if len(variation) != n_crit:
-        raise ValueError("Variações contínuas incompatíveis com os critérios.")
+        raise ValueError("Continuous variations do not match the criteria.")
     if np.any(variation < 0):
-        raise ValueError("A variação percentual não pode ser negativa.")
+        raise ValueError("The percentage variation cannot be negative.")
 
     reference_rows = np.asarray(reference_rows, dtype=float)
     if reference_rows.shape != (n_exp, n_crit):
         raise ValueError(
-            "reference_rows deve possuir dimensão "
-            f"({n_exp},{n_crit})."
+            f"reference_rows must have shape ({n_exp}, {n_crit})."
         )
 
-    if precision_levels is None:
-        precision_matrix = [["Alta"] * n_crit for _ in range(n_exp)]
-    else:
-        arr = np.asarray(precision_levels, dtype=object)
-        if arr.ndim == 1:
-            if len(arr) != n_crit:
-                raise ValueError("Número de níveis de precisão incompatível.")
-            precision_matrix = [list(arr) for _ in range(n_exp)]
-        elif arr.ndim == 2:
-            if arr.shape != (n_exp, n_crit):
-                raise ValueError(
-                    "A matriz de precisão deve possuir dimensão "
-                    f"({n_exp}, {n_crit})."
-                )
-            precision_matrix = arr.tolist()
-        else:
-            raise ValueError("Formato de precisão inválido.")
+    precision_matrix = normalize_precision_matrix(precision_levels, n_exp, n_crit)
+
+    ordinal_cols = [k for k, t in enumerate(types) if t == ORDINAL]
+    continuous_cols = [k for k, t in enumerate(types) if t == CONTINUOUS]
+
+    # Per-DM fuzzy weights (criterion order = canonical order).
+    dm_fuzzy = np.stack([
+        weights_from_reference_row(row)[1] for row in reference_rows
+    ])                                                   # [DM, crit, 4]
 
     phi_mc = np.zeros((n_req, n_mc))
     phi_plus_mc = np.zeros((n_req, n_mc))
     phi_minus_mc = np.zeros((n_req, n_mc))
     rank_mc = np.zeros((n_req, n_mc))
-    top1_count = np.zeros(n_req, dtype=int)
+    rank_counts = np.zeros((n_req, n_req))
+    outranking = np.zeros((n_req, n_req))
+    tol = 1e-10
 
     W_samples = np.zeros((n_mc, n_crit))
 
+    v_frac = variation / 100.0
+    alt_idx = np.arange(n_req)[:, None]
+
     for mc in range(n_mc):
 
-        # 1) FAHP-Express: amostragem empírica das respostas dos especialistas.
-        w_crisp_mc, w_fuzzy_group = _sample_fahp_weights(
-            reference_rows,
-            rng,
-        )
-        W_samples[mc] = w_crisp_mc
+        # 1) weights
+        if weight_sampling == "dm_bootstrap":
+            draw = rng.integers(0, n_exp, size=n_exp)
+            w_fuzzy_group = dm_fuzzy[draw].mean(axis=0)
+            w_crisp = w_fuzzy_group.mean(axis=1)
+            w_crisp = w_crisp / w_crisp.sum()
+        else:
+            w_crisp, w_fuzzy_group = _independent_weights(reference_rows, rng)
+        W_samples[mc] = w_crisp
 
-        # Os fluxos são mantidos fuzzy durante toda a agregação.
         phi_plus_fuzzy_exp = np.zeros((n_req, 4, n_exp))
         phi_minus_fuzzy_exp = np.zeros((n_req, 4, n_exp))
         phi_net_fuzzy_exp = np.zeros((n_req, 4, n_exp))
 
-        # 2) Atributos por especialista.
-        for e, expert in enumerate(experts):
+        # 2) attributes per decision maker
+        for e in range(n_exp):
+            data_mc = stack[e].copy()
 
-            data_e = np.asarray(
-                evaluations[expert],
-                dtype=float,
-            )
+            if ordinal_cols:
+                picks = rng.integers(0, n_exp, size=(n_req, len(ordinal_cols)))
+                data_mc[:, ordinal_cols] = stack[picks, alt_idx, ordinal_cols]
 
-            data_mc = data_e.copy()
-
-            for i in range(n_req):
-                for k in range(n_crit):
-
-                    if types[k] == "Ordinal":
-                        # CPP empírico: distribuição observada entre especialistas.
-                        vals = np.array([
-                            evaluations[name][i, k]
-                            for name in experts
-                        ])
-                        data_mc[i, k] = _empirical_sample(
-                            vals,
-                            rng,
-                        )
-
-                    elif types[k] == "Contínuo":
-                        # Incerteza epistemológica/paramétrica simples:
-                        # ±v% do valor observado.
-                        v = variation[k] / 100.0
-                        x = data_e[i, k]
-
-                        if x == 0:
-                            # Em torno de zero, a variação relativa é degenerada.
-                            data_mc[i, k] = 0.0
-                        else:
-                            lo = x * (1.0 - v)
-                            hi = x * (1.0 + v)
-
-                            # Mantém a faixa ordenada para valores negativos.
-                            lo, hi = min(lo, hi), max(lo, hi)
-                            data_mc[i, k] = rng.uniform(lo, hi)
-
-                    else:
-                        raise ValueError(
-                            f"Tipo de critério desconhecido: {types[k]!r}"
-                        )
+            for k in continuous_cols:
+                x = stack[e][:, k]
+                lo = x * (1.0 - v_frac[k])
+                hi = x * (1.0 + v_frac[k])
+                lo, hi = np.minimum(lo, hi), np.maximum(lo, hi)
+                data_mc[:, k] = rng.uniform(lo, hi)
 
             F_e = build_fuzzy_matrix(
                 data_mc,
@@ -194,9 +192,7 @@ def run_e_prom_monte_carlo(
                 precision_core_pct=precision_core_pct,
             )
 
-            # Para manter a lógica de grupo do MC-SIPREM, o mesmo vetor
-            # de pesos da iteração é aplicado a cada especialista.
-            output = run_fuzzy_promethee_trap(
+            _, _, _, pp_f, pm_f, pn_f = run_fuzzy_promethee_trap(
                 F_e,
                 w_fuzzy_group,
                 directions,
@@ -206,82 +202,39 @@ def run_e_prom_monte_carlo(
                 defuzzify=False,
             )
 
-            (
-                _,
-                _,
-                _,
-                pp_f,
-                pm_f,
-                pn_f,
-            ) = output
-
             phi_plus_fuzzy_exp[:, :, e] = pp_f
             phi_minus_fuzzy_exp[:, :, e] = pm_f
             phi_net_fuzzy_exp[:, :, e] = pn_f
 
-        # 3) Agregação a posteriori NO DOMÍNIO FUZZY.
-        # A defuzzificação ocorre somente após a agregação dos especialistas.
-        phi_plus_fuzzy_now = np.mean(phi_plus_fuzzy_exp, axis=2)
-        phi_minus_fuzzy_now = np.mean(phi_minus_fuzzy_exp, axis=2)
-        phi_fuzzy_now = np.mean(phi_net_fuzzy_exp, axis=2)
+        # 3) aggregate in the fuzzy domain, defuzzify afterwards
+        plus_f = phi_plus_fuzzy_exp.mean(axis=2)
+        minus_f = phi_minus_fuzzy_exp.mean(axis=2)
+        net_f = phi_net_fuzzy_exp.mean(axis=2)
 
-        phi_plus_now = np.array([
-            defuzz_coa(x) for x in phi_plus_fuzzy_now
-        ])
-        phi_minus_now = np.array([
-            defuzz_coa(x) for x in phi_minus_fuzzy_now
-        ])
-        phi_now = np.array([
-            defuzz_coa(x) for x in phi_fuzzy_now
-        ])
+        pp = np.array([defuzz_coa(x) for x in plus_f])
+        pm = np.array([defuzz_coa(x) for x in minus_f])
+        phi = np.array([defuzz_coa(x) for x in net_f])
 
-        rank_now = rank_from_net_flow(phi_now)
+        phi_plus_mc[:, mc] = pp
+        phi_minus_mc[:, mc] = pm
+        phi_mc[:, mc] = phi
+        rank_mc[:, mc] = rank_from_net_flow(phi)
+        _add_rank_shares(phi, rank_counts)
 
-        phi_plus_mc[:, mc] = phi_plus_now
-        phi_minus_mc[:, mc] = phi_minus_now
-        phi_mc[:, mc] = phi_now
-        rank_mc[:, mc] = rank_now
+        # PROMETHEE I: i outranks j if it is not worse on both flows and
+        # strictly better on at least one.
+        not_worse_plus = pp[:, None] >= pp[None, :] - tol
+        not_worse_minus = pm[:, None] <= pm[None, :] + tol
+        strictly_better = (
+            (pp[:, None] > pp[None, :] + tol)
+            | (pm[:, None] < pm[None, :] - tol)
+        )
+        outranking += (not_worse_plus & not_worse_minus & strictly_better)
 
-        top1_count[
-            np.where(rank_now == 1)[0]
-        ] += 1
-
-    # Matriz de aceitabilidade de ranking.
-    rank_acceptability = np.zeros((n_req, n_req))
-    for i in range(n_req):
-        for r in range(1, n_req + 1):
-            rank_acceptability[i, r - 1] = (
-                100.0 * np.mean(rank_mc[i] == r)
-            )
-
-    # Matriz de probabilidade de sobreclassificação PROMETHEE I.
-    outranking = np.zeros((n_req, n_req))
-    tol = 1e-10
-
-    for mc in range(n_mc):
-        pp = phi_plus_mc[:, mc]
-        pm = phi_minus_mc[:, mc]
-
-        for i in range(n_req):
-            for j in range(n_req):
-                if i == j:
-                    continue
-
-                not_worse_plus = pp[i] >= pp[j] - tol
-                not_worse_minus = pm[i] <= pm[j] + tol
-                strictly_better = (
-                    pp[i] > pp[j] + tol
-                    or pm[i] < pm[j] - tol
-                )
-
-                if (
-                    not_worse_plus
-                    and not_worse_minus
-                    and strictly_better
-                ):
-                    outranking[i, j] += 1
-
+    rank_acceptability = 100.0 * rank_counts / n_mc
     outranking = 100.0 * outranking / n_mc
+
+    ddof = 1 if n_mc > 1 else 0
 
     return {
         "phi_mc": phi_mc,
@@ -289,15 +242,17 @@ def run_e_prom_monte_carlo(
         "phi_minus_mc": phi_minus_mc,
         "rank_mc": rank_mc,
         "mean_rank": np.mean(rank_mc, axis=1),
-        "std_rank": np.std(rank_mc, axis=1, ddof=1),
+        "std_rank": np.std(rank_mc, axis=1, ddof=ddof),
         "mean_phi": np.mean(phi_mc, axis=1),
-        "std_phi": np.std(phi_mc, axis=1, ddof=1),
-        "freq_top1": top1_count / n_mc,
+        "std_phi": np.std(phi_mc, axis=1, ddof=ddof),
+        # Ties for 1st place split their credit evenly.
+        "freq_top1": rank_counts[:, 0] / n_mc,
         "rank_acceptability": rank_acceptability,
         "outranking_acceptability": outranking,
         "W_samples": W_samples,
         "n_mc": n_mc,
         "seed": seed,
+        "weight_sampling": weight_sampling,
         "continuous_variation_pct": variation,
         "precision_levels": precision_matrix,
     }

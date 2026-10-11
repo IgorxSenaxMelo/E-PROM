@@ -1,21 +1,11 @@
-"""FAHP trapezoidal + Buckley para o E-PROM."""
+"""Trapezoidal FAHP + Buckley weights for E-PROM (FAHP-Express)."""
 
 from __future__ import annotations
 import numpy as np
 
+from .labels import parse_importance
 
-SAATY_MAP = {
-    "igual importância": 1,
-    "fracamente mais importante": 2,
-    "moderadamente mais importante": 3,
-    "moderadamente a fortemente mais importante": 4,
-    "fortemente mais importante": 5,
-    "fortemente a muito fortemente mais importante": 6,
-    "muito fortemente mais importante": 7,
-    "muito fortemente a extremamente mais importante": 8,
-    "extremamente mais importante": 9,
-}
-
+# Fuzzy representation of the 1-9 linguistic importance scale.
 FAHP_SCALE = np.array([
     [1.0, 1.0, 1.0, 1.0],
     [1.0, 1.5, 2.5, 3.0],
@@ -30,35 +20,20 @@ FAHP_SCALE = np.array([
 
 
 def saaty_linguistic2num(x):
-    if x is None or (isinstance(x, float) and np.isnan(x)):
-        raise ValueError("Valor vazio encontrado na escala Saaty.")
-
-    if isinstance(x, (int, float, np.integer, np.floating)):
-        value = float(x)
-        if not np.isfinite(value):
-            raise ValueError("Valor NaN/inf na escala Saaty.")
-        return value
-
-    s = str(x).strip().lower().replace(",", ".")
-    try:
-        value = float(s)
-        if np.isfinite(value):
-            return value
-    except ValueError:
-        pass
-    if s not in SAATY_MAP:
-        raise ValueError(f"Escala Saaty não reconhecida: {x!r}")
-    return float(SAATY_MAP[s])
+    """Linguistic term (English or Portuguese), number or numeric string -> float."""
+    return parse_importance(x)
 
 
 def crisp_to_fuzzy_trap_interp(x):
     x = float(x)
 
     if not np.isfinite(x) or x <= 0:
-        raise ValueError("Comparação Saaty deve ser positiva e finita.")
+        raise ValueError("A Saaty comparison must be positive and finite.")
     if x < 1 / 9 - 1e-12 or x > 9 + 1e-12:
         raise ValueError(
-            f"Valor reconstruído fora da escala Saaty: {x:.6f}"
+            f"Reconstructed comparison {x:.6f} is outside the 1/9-9 Saaty scale. "
+            "Check the FAHP-Express values (the ratio between two criteria "
+            "cannot exceed 9)."
         )
 
     if abs(x - 1) < 1e-12:
@@ -80,10 +55,7 @@ def crisp_to_fuzzy_trap_interp(x):
     upper = int(np.ceil(x))
     alpha = (x - lower) / (upper - lower)
 
-    return (
-        (1 - alpha) * FAHP_SCALE[lower - 1]
-        + alpha * FAHP_SCALE[upper - 1]
-    )
+    return (1 - alpha) * FAHP_SCALE[lower - 1] + alpha * FAHP_SCALE[upper - 1]
 
 
 def calc_fahp_buckley(m_fuzzy):
@@ -91,7 +63,7 @@ def calc_fahp_buckley(m_fuzzy):
 
     n = m_fuzzy.shape[0]
     if m_fuzzy.shape != (n, n, 4):
-        raise ValueError("Matriz fuzzy deve possuir dimensão [n,n,4].")
+        raise ValueError("The fuzzy matrix must have shape [n, n, 4].")
 
     r = np.ones((n, 4), dtype=float)
 
@@ -118,11 +90,13 @@ def calc_fahp_buckley(m_fuzzy):
 
 
 def weights_from_reference_row(reference_values):
-    """Reconstrói a matriz AHP a partir da linha de referência do E-PROM.
+    """Rebuild the AHP matrix from one FAHP-Express reference row.
 
-    O primeiro elemento é a âncora e deve ser 1. Os demais valores representam
-    quantas vezes a referência é mais importante que cada critério. Assim,
-    A_ij = v_j / v_i, produzindo A_1j = v_j e A_j1 = 1/v_j.
+    The reference criterion has value 1. Every other value says how many times
+    the reference is more important than that criterion. The matrix is
+    A_ij = v_j / v_i (so A_ref,j = v_j and A_j,ref = 1 / v_j). The result does
+    not depend on which column holds the reference, so the row can be given in
+    any criterion order.
     """
     vals = np.array(
         [saaty_linguistic2num(x) for x in reference_values],
@@ -132,13 +106,11 @@ def weights_from_reference_row(reference_values):
     n = len(vals)
 
     if n < 2:
-        raise ValueError("O FAHP-Express requer pelo menos 2 critérios.")
+        raise ValueError("FAHP-Express requires at least 2 criteria.")
 
-    # A_ij = v_j / v_i, conforme a reconstrução do FAHP-Express.
     A = vals[None, :] / vals[:, None]
 
     m_fuzzy = np.zeros((n, n, 4), dtype=float)
-
     for i in range(n):
         for j in range(n):
             m_fuzzy[i, j] = crisp_to_fuzzy_trap_interp(A[i, j])
@@ -149,6 +121,7 @@ def weights_from_reference_row(reference_values):
 
 
 def group_weights_from_reference_rows(rows):
+    """Individual and group fuzzy weights from one reference row per DM."""
     individual_fuzzy = []
     individual_crisp = []
     matrices = []
@@ -162,26 +135,11 @@ def group_weights_from_reference_rows(rows):
         matrices.append(A)
         fuzzy_matrices.append(mf)
 
-    individual_fuzzy = np.stack(
-        individual_fuzzy,
-        axis=2,
-    )
+    individual_fuzzy = np.stack(individual_fuzzy, axis=2)    # [criteria, 4, DMs]
+    individual_crisp = np.stack(individual_crisp, axis=1)    # [criteria, DMs]
 
-    individual_crisp = np.stack(
-        individual_crisp,
-        axis=1,
-    )
-
-    group_fuzzy = np.mean(
-        individual_fuzzy,
-        axis=2,
-    )
-
-    group_crisp = np.mean(
-        group_fuzzy,
-        axis=1,
-    )
-
+    group_fuzzy = np.mean(individual_fuzzy, axis=2)
+    group_crisp = np.mean(group_fuzzy, axis=1)
     group_crisp = group_crisp / np.sum(group_crisp)
 
     return {

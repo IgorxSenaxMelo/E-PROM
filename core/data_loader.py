@@ -1,216 +1,361 @@
-"""Leitura das planilhas do E-PROM.
+"""Workbook readers for E-PROM.
 
-Formato esperado da planilha de avaliações:
-- uma aba por especialista;
-- a última aba é reservada para instruções/apoio;
-- colunas A e B: ID e descrição da alternativa;
-- colunas C em diante: critérios;
-- todos os especialistas devem possuir os mesmos IDs e critérios.
+Evaluation workbook
+    - one sheet per decision maker (DM); the sheet name is the DM name;
+    - header row with ``ID`` and ``Description`` in columns A and B, followed
+      by one column per criterion;
+    - every DM must contain the same alternative IDs and criterion names (the
+      order of rows and columns may differ; they are aligned by name);
+    - sheets named Guide / _Lists / Instructions ... are ignored.
+
+FAHP-Express workbook
+    - one sheet per DM (the DM names must match the evaluation workbook);
+    - a ``Criteria`` header row: the FIRST criterion is that DM's reference;
+    - a ``Comparison with reference`` row: how many times the reference is
+      more important than each criterion (linguistic term or number 1-9);
+    - an ``Attribute precision`` row: High / Medium / Low per criterion.
+
+English and Portuguese labels are both accepted.
 """
 
 from __future__ import annotations
 from pathlib import Path
+
 import numpy as np
-import pandas as pd
+from openpyxl import load_workbook
+
+from .fahp import group_weights_from_reference_rows
+from .labels import (
+    is_support_sheet,
+    match_key,
+    normalize_precision,
+    parse_importance,
+)
+
+_ID_KEYS = {"id"}
+_DESCRIPTION_KEYS = {"description", "descricao"}
+_CRITERIA_KEYS = {"criteria", "criterios"}
+_COMPARISON_KEYS = {"comparison with reference", "comparacao com referencia"}
+_PRECISION_KEYS = {"attribute precision", "precisao do atributo"}
+
+
+def _text(value):
+    return "" if value is None else str(value).strip()
+
+
+def _is_empty(value):
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _to_number(x):
-    if x is None or (isinstance(x, float) and np.isnan(x)):
-        raise ValueError("Valor vazio encontrado na planilha.")
+    if _is_empty(x):
+        raise ValueError("Empty value found in the workbook.")
 
     if isinstance(x, (int, float, np.integer, np.floating)):
         value = float(x)
-        if not np.isfinite(value):
-            raise ValueError("Valor NaN/inf encontrado na planilha.")
-        return value
+    else:
+        try:
+            value = float(str(x).strip().replace(",", "."))
+        except ValueError:
+            raise ValueError(
+                f"Non-numeric value found in the evaluation matrix: {x!r}"
+            ) from None
 
-    s = str(x).strip().replace(",", ".")
-    try:
-        value = float(s)
-    except ValueError:
-        raise ValueError(
-            f"Valor não numérico encontrado na matriz de avaliações: {x!r}"
-        )
     if not np.isfinite(value):
-        raise ValueError("Valor NaN/inf encontrado na planilha.")
+        raise ValueError("NaN/inf value found in the workbook.")
     return value
 
 
-def read_expert_workbook(path):
-    path = Path(path)
-    xls = pd.ExcelFile(path)
-    sheets = xls.sheet_names
+def _decision_maker_sheets(wb):
+    return [ws for ws in wb.worksheets if not is_support_sheet(ws.title)]
 
-    if len(sheets) < 2:
+
+# --------------------------------------------------------------------------
+# Evaluation workbook
+# --------------------------------------------------------------------------
+
+def _find_evaluation_header(ws, max_scan_rows=20):
+    for r in range(1, min(ws.max_row, max_scan_rows) + 1):
+        if (
+            match_key(ws.cell(r, 1).value) in _ID_KEYS
+            and match_key(ws.cell(r, 2).value) in _DESCRIPTION_KEYS
+        ):
+            return r
+    return None
+
+
+def _read_evaluation_sheet(ws):
+    header_row = _find_evaluation_header(ws)
+    if header_row is None:
         raise ValueError(
-            "A planilha deve possuir pelo menos uma aba de especialista "
-            "e uma aba final de instruções/apoio."
+            f"Sheet '{ws.title}': could not find the header row. Expected "
+            "'ID' in column A and 'Description' in column B."
         )
 
-    expert_sheets = sheets[:-1]
-    if not expert_sheets:
-        raise ValueError("Nenhuma aba de especialista foi encontrada.")
+    criteria = []
+    columns = []
+    for c in range(3, ws.max_column + 1):
+        name = _text(ws.cell(header_row, c).value)
+        if name:
+            criteria.append(name)
+            columns.append(c)
 
-    evaluations = {}
-    ids = None
-    descriptions = None
-    criteria = None
+    if not criteria:
+        raise ValueError(
+            f"Sheet '{ws.title}' needs an ID, a description and at least one criterion."
+        )
 
-    for sheet in expert_sheets:
-        df = pd.read_excel(path, sheet_name=sheet, header=0)
+    keys = [match_key(c) for c in criteria]
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"Sheet '{ws.title}': duplicated criterion names.")
 
-        if df.shape[1] < 3:
-            raise ValueError(
-                f"A aba {sheet!r} precisa ter ID, descrição e pelo menos um critério."
-            )
+    ids, descriptions, values = [], [], []
+    for r in range(header_row + 1, ws.max_row + 1):
+        row_cells = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)]
+        if all(_is_empty(v) for v in row_cells):
+            break                                  # first blank row ends the data
+        alt_id = _text(ws.cell(r, 1).value)
+        if not alt_id:
+            raise ValueError(f"Sheet '{ws.title}', row {r}: missing alternative ID.")
+        try:
+            row_values = [_to_number(ws.cell(r, c).value) for c in columns]
+        except ValueError as exc:
+            raise ValueError(f"Sheet '{ws.title}', alternative {alt_id}: {exc}") from None
+        ids.append(alt_id)
+        descriptions.append(_text(ws.cell(r, 2).value))
+        values.append(row_values)
 
-        current_ids = df.iloc[:, 0].tolist()
-        current_desc = df.iloc[:, 1].tolist()
-        current_criteria = [str(c).strip() for c in df.columns[2:]]
-
-        if any(c.lower().startswith("unnamed") for c in current_criteria):
-            raise ValueError(
-                f"Aba {sheet!r}: há coluna de critério sem nome."
-            )
-
-        if ids is None:
-            ids = current_ids
-            descriptions = current_desc
-            criteria = current_criteria
-        else:
-            if current_ids != ids:
-                raise ValueError(
-                    f"Aba {sheet!r} possui IDs diferentes dos demais especialistas."
-                )
-            if current_criteria != criteria:
-                raise ValueError(
-                    f"Aba {sheet!r} possui critérios diferentes dos demais especialistas."
-                )
-
-        raw = df.iloc[:, 2:]
-        numeric = np.empty(raw.shape, dtype=float)
-
-        for i in range(raw.shape[0]):
-            for k in range(raw.shape[1]):
-                numeric[i, k] = _to_number(raw.iat[i, k])
-
-        evaluations[sheet] = numeric
-
-    n_criteria = len(criteria)
+    if len(ids) < 2:
+        raise ValueError(f"Sheet '{ws.title}': at least two alternatives are required.")
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"Sheet '{ws.title}': duplicated alternative IDs.")
 
     return {
-        "sheets": expert_sheets,
-        "expert_names": expert_sheets,
         "ids": ids,
         "descriptions": descriptions,
         "criteria": criteria,
-        "evaluations": evaluations,
-        "n_experts": len(expert_sheets),
-        "n_requirements": len(ids),
-        "n_criteria": n_criteria,
+        "keys": keys,
+        "values": np.asarray(values, dtype=float),
     }
 
 
-def read_fahp_workbook(path, n_criteria=None):
-    """Lê a planilha FAHP-Express.
+def read_expert_workbook(path):
+    """Read the evaluation workbook (see module docstring)."""
+    wb = load_workbook(Path(path), data_only=True)
+    sheets = _decision_maker_sheets(wb)
 
-    Formato simplificado para o usuário:
-      linha 4: comparação relativa ao critério de referência;
-      linha 5: precisão do atributo por especialista (Alta, Média ou Baixa).
-
-    O primeiro critério é sempre o critério de referência e deve ser o mais
-    importante. Portanto, sua comparação consigo mesmo é fixada em 1.
-    Os demais valores são fatores positivos na escala de razão, indicando
-    quantas vezes o critério de referência é mais importante que o critério.
-
-    Os parâmetros do trapezoide fuzzy dos atributos contínuos são padronizados
-    internamente pelo E-PROM conforme o nível de precisão; o usuário não
-    precisa informar suporte e núcleo separadamente.
-    """
-    path = Path(path)
-    xls = pd.ExcelFile(path)
-    sheets = xls.sheet_names
-
-    if len(sheets) < 2:
+    if not sheets:
         raise ValueError(
-            "A planilha FAHP-Express deve possuir abas de especialistas "
-            "e uma aba final de apoio/instruções."
+            "The workbook has no decision-maker sheets (sheets named Guide, "
+            "_Lists or Instructions are ignored)."
         )
 
-    expert_sheets = sheets[:-1]
-    rows = []
-    precision_configs = []
+    evaluations = {}
+    ref = None
 
-    for sheet in expert_sheets:
-        df = pd.read_excel(path, sheet_name=sheet, header=None)
+    for ws in sheets:
+        parsed = _read_evaluation_sheet(ws)
 
-        if df.shape[0] < 4:
-            raise ValueError(f"Aba FAHP {sheet!r} não possui a linha 4.")
+        if ref is None:
+            ref = parsed
+            evaluations[ws.title] = parsed["values"]
+            continue
 
-        available = df.iloc[3, 1:].tolist()
-        precision = df.iloc[4, 1:].tolist() if df.shape[0] >= 5 else []
+        if set(parsed["keys"]) != set(ref["keys"]):
+            missing = [c for c, k in zip(ref["criteria"], ref["keys"])
+                       if k not in parsed["keys"]]
+            extra = [c for c, k in zip(parsed["criteria"], parsed["keys"])
+                     if k not in ref["keys"]]
+            details = []
+            if missing:
+                details.append("missing: " + ", ".join(missing))
+            if extra:
+                details.append("extra: " + ", ".join(extra))
+            raise ValueError(
+                f"Sheet '{ws.title}' has different criteria from the first "
+                f"decision maker ({'; '.join(details)})."
+            )
 
-        while available and (
-            available[-1] is None
-            or (isinstance(available[-1], float) and np.isnan(available[-1]))
-        ):
-            available.pop()
+        id_pos = {a: i for i, a in enumerate(parsed["ids"])}
+        if set(id_pos) != set(ref["ids"]):
+            raise ValueError(
+                f"Sheet '{ws.title}' has different alternative IDs from the "
+                "first decision maker."
+            )
 
-        if n_criteria is not None:
-            if len(available) < n_criteria:
-                raise ValueError(
-                    f"Aba FAHP {sheet!r}: esperados {n_criteria} valores na linha de referência."
+        col_pos = {k: i for i, k in enumerate(parsed["keys"])}
+        row_order = [id_pos[a] for a in ref["ids"]]
+        col_order = [col_pos[k] for k in ref["keys"]]
+        evaluations[ws.title] = parsed["values"][np.ix_(row_order, col_order)]
+
+    names = list(evaluations.keys())
+    return {
+        "sheets": names,
+        "expert_names": names,
+        "ids": ref["ids"],
+        "descriptions": ref["descriptions"],
+        "criteria": ref["criteria"],
+        "evaluations": evaluations,
+        "n_experts": len(names),
+        "n_requirements": len(ref["ids"]),
+        "n_criteria": len(ref["criteria"]),
+    }
+
+
+# --------------------------------------------------------------------------
+# FAHP-Express workbook
+# --------------------------------------------------------------------------
+
+def _find_fahp_header(ws, max_scan_rows=30):
+    for r in range(1, min(ws.max_row, max_scan_rows) + 1):
+        if match_key(ws.cell(r, 1).value) not in _CRITERIA_KEYS:
+            continue
+        filled = sum(
+            1 for c in range(2, ws.max_column + 1)
+            if not _is_empty(ws.cell(r, c).value)
+        )
+        if filled >= 2:
+            return r
+    return None
+
+
+def _find_labelled_row(ws, header_row, keys, fallback_offset):
+    for r in range(header_row + 1, min(ws.max_row, header_row + 10) + 1):
+        if match_key(ws.cell(r, 1).value) in keys:
+            return r
+    fallback = header_row + fallback_offset
+    return fallback if fallback <= ws.max_row else None
+
+
+def _read_fahp_sheet(ws, criteria):
+    header_row = _find_fahp_header(ws)
+    if header_row is None:
+        raise ValueError(
+            f"FAHP sheet '{ws.title}': could not find the 'Criteria' header row."
+        )
+
+    columns = {}
+    order = []
+    for c in range(2, ws.max_column + 1):
+        name = _text(ws.cell(header_row, c).value)
+        if not name:
+            continue
+        key = match_key(name)
+        if key in columns:
+            raise ValueError(f"FAHP sheet '{ws.title}': duplicated criterion '{name}'.")
+        columns[key] = c
+        order.append(name)
+
+    wanted = {match_key(c): c for c in criteria}
+    missing = [name for key, name in wanted.items() if key not in columns]
+    extra = [name for name in order if match_key(name) not in wanted]
+    if missing or extra:
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if extra:
+            details.append("extra: " + ", ".join(extra))
+        raise ValueError(
+            f"FAHP sheet '{ws.title}' has different criteria from the "
+            f"evaluation workbook ({'; '.join(details)})."
+        )
+
+    comparison_row = _find_labelled_row(ws, header_row, _COMPARISON_KEYS, 1)
+    if comparison_row is None:
+        raise ValueError(
+            f"FAHP sheet '{ws.title}': could not find 'Comparison with reference'."
+        )
+    precision_row = _find_labelled_row(ws, header_row, _PRECISION_KEYS, 2)
+
+    reference_key = match_key(order[0])
+    reference_name = order[0]
+
+    row = []
+    precision = []
+    for criterion in criteria:
+        col = columns[match_key(criterion)]
+        try:
+            row.append(parse_importance(ws.cell(comparison_row, col).value))
+        except ValueError as exc:
+            raise ValueError(
+                f"FAHP sheet '{ws.title}', criterion '{criterion}': {exc}"
+            ) from None
+        try:
+            precision.append(
+                normalize_precision(
+                    ws.cell(precision_row, col).value if precision_row else None
                 )
-            available = available[:n_criteria]
-
-        from .fahp import saaty_linguistic2num
-        numeric_row = [saaty_linguistic2num(x) for x in available]
-
-        if len(numeric_row) < 2:
-            raise ValueError("O FAHP-Express requer pelo menos 2 critérios.")
-
-        # O primeiro critério é a âncora do FAHP-Express.
-        if not np.isclose(numeric_row[0], 1.0, atol=1e-9):
-            raise ValueError(
-                f"Aba FAHP {sheet!r}: o primeiro critério é a referência e "
-                "deve possuir valor 1."
             )
-
-        # Como o primeiro critério é definido como o mais importante, os
-        # fatores dos demais critérios devem ser >= 1: 1 = referência; 3 =
-        # referência três vezes mais importante que o critério em questão.
-        if any(x < 1.0 - 1e-9 for x in numeric_row):
+        except ValueError as exc:
             raise ValueError(
-                f"Aba FAHP {sheet!r}: como o primeiro critério é a referência "
-                "mais importante, os demais fatores devem ser >= 1."
-            )
+                f"FAHP sheet '{ws.title}', criterion '{criterion}': {exc}"
+            ) from None
 
-        if len(precision) < len(numeric_row):
-            precision = ["Alta"] * len(numeric_row)
+    ref_idx = [match_key(c) for c in criteria].index(reference_key)
+    if not np.isclose(row[ref_idx], 1.0, atol=1e-9):
+        raise ValueError(
+            f"FAHP sheet '{ws.title}': the first criterion ('{reference_name}') "
+            "is the reference and must be 'Equal importance' (1)."
+        )
+    if any(v < 1.0 - 1e-9 for v in row):
+        raise ValueError(
+            f"FAHP sheet '{ws.title}': the reference criterion must be the most "
+            "important one, so every other value must be >= 1."
+        )
+
+    return row, precision, reference_name
+
+
+def read_fahp_workbook(path, criteria, expert_names=None):
+    """Read the FAHP-Express workbook.
+
+    ``criteria`` are the canonical criterion names (from the evaluation
+    workbook). Values are returned in that canonical order, whatever order and
+    reference criterion each DM used. If ``expert_names`` is given, the DMs are
+    matched to the evaluation workbook by sheet name (falling back to sheet
+    position, with a warning, when the names differ).
+    """
+    wb = load_workbook(Path(path), data_only=True)
+    sheets = _decision_maker_sheets(wb)
+
+    if not sheets:
+        raise ValueError("The FAHP-Express workbook has no decision-maker sheets.")
+    if len(criteria) < 2:
+        raise ValueError("FAHP-Express requires at least 2 criteria.")
+
+    warnings = []
+
+    if expert_names is not None:
+        expert_names = list(expert_names)
+        if len(sheets) != len(expert_names):
+            raise ValueError(
+                f"The FAHP-Express workbook has {len(sheets)} decision-maker "
+                f"sheets but the evaluation workbook has {len(expert_names)}."
+            )
+        by_key = {match_key(ws.title): ws for ws in sheets}
+        if set(by_key) == {match_key(n) for n in expert_names} and len(by_key) == len(sheets):
+            sheets = [by_key[match_key(n)] for n in expert_names]
         else:
-            precision = precision[:len(numeric_row)]
+            warnings.append(
+                "The decision-maker sheet names differ between the two workbooks "
+                f"({[ws.title for ws in sheets]} vs {expert_names}); they were "
+                "paired by sheet position. Rename the sheets identically to pair "
+                "them by name."
+            )
 
-        allowed = {"Alta", "Média", "Baixa"}
-        normalized_precision = []
-        for k, value in enumerate(precision):
-            if value is None or (isinstance(value, float) and np.isnan(value)):
-                value = "Alta"
-            value = str(value).strip()
-            if value not in allowed:
-                raise ValueError(
-                    f"Aba FAHP {sheet!r}, critério {k+1}: precisão inválida {value!r}. "
-                    "Use Alta, Média ou Baixa."
-                )
-            normalized_precision.append(value)
+    rows, precision, references, names = [], [], [], []
+    for ws in sheets:
+        row, prec, ref_name = _read_fahp_sheet(ws, criteria)
+        rows.append(row)
+        precision.append(prec)
+        references.append(ref_name)
+        names.append(ws.title)
 
-        precision_configs.append(normalized_precision)
-        rows.append(numeric_row)
-    # A precisão é individual: precision_levels[especialista][criterio].
-
-    from .fahp import group_weights_from_reference_rows
     result = group_weights_from_reference_rows(rows)
-    result["reference_rows"] = rows
-    result["precision_levels"] = precision_configs
-    result["sheets"] = expert_sheets
-    result["expert_names"] = expert_sheets
+    result["reference_rows"] = np.asarray(rows, dtype=float)      # [DM, criteria]
+    result["precision_levels"] = precision                         # [DM][criteria]
+    result["reference_criteria"] = references
+    result["sheets"] = names
+    result["expert_names"] = names
+    result["warnings"] = warnings
     return result
