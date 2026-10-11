@@ -12,6 +12,98 @@ import plotly.graph_objects as go
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+# ---------------------------------------------------------------
+# Self-check of the core/ package. If core/ and app.py come from different
+# releases (partial upload) or Streamlit kept an old module in memory, show a
+# clear message instead of a cryptic ImportError.
+# ---------------------------------------------------------------
+import importlib
+
+CORE_VERSION_REQUIRED = "8.0.1"
+
+# Modules in dependency order, with the names app.py needs from each.
+_CORE_REQUIRED = [
+    ("core.labels", ["CONTINUOUS", "ORDINAL"]),
+    ("core.fuzzy_numbers", ["defuzz_coa"]),
+    ("core.promethee", ["promethee_i_relation"]),
+    ("core.fahp", []),
+    ("core.e_prom_core", ["run_e_prom"]),
+    ("core.flowsort", ["run_flowsort", "suggest_profiles"]),
+    ("core.monte_carlo", ["run_e_prom_monte_carlo"]),
+    ("core.analysis", [
+        "criterion_contributions", "expert_agreement", "flow_terms",
+        "leave_one_expert_out", "pairwise_comparison", "rank_reversal_test",
+        "weight_sensitivity",
+    ]),
+    ("core.data_loader", ["read_expert_workbook", "read_fahp_workbook"]),
+    ("core.validation", [
+        "summarize", "validate_against_config",
+        "validate_evaluation_workbook", "validate_fahp_workbook",
+    ]),
+    ("core.portfolio", [
+        "OBJECTIVE_MODES", "greedy_by_rank", "portfolio_values", "solve_portfolio",
+    ]),
+    ("core.config_io", [
+        "build_config", "criteria_defaults", "dumps",
+        "expert_weight_defaults", "parse_config",
+    ]),
+    ("core.thresholds", ["preference_curve", "suggest_thresholds"]),
+    ("core.report", ["build_report"]),
+]
+
+
+def _core_problems(reload=False):
+    problems = []
+    try:
+        core_pkg = importlib.import_module("core")
+        if reload:
+            core_pkg = importlib.reload(core_pkg)
+    except Exception as exc:
+        return [f"The core/ package could not be imported: {exc}"]
+
+    found = getattr(core_pkg, "__version__", "unknown")
+    if found != CORE_VERSION_REQUIRED:
+        problems.append(
+            f"core/__init__.py reports version {found}; app.py needs {CORE_VERSION_REQUIRED}."
+        )
+
+    for module_name, names in _CORE_REQUIRED:
+        try:
+            module = importlib.import_module(module_name)
+            if reload:
+                module = importlib.reload(module)
+        except Exception as exc:
+            problems.append(f"{module_name}: cannot be imported ({type(exc).__name__}: {exc}).")
+            continue
+        missing = [n for n in names if not hasattr(module, n)]
+        if missing:
+            problems.append(
+                f"{module_name} ({getattr(module, '__file__', '?')}) is missing: "
+                + ", ".join(missing)
+            )
+    return problems
+
+
+_core_issues = _core_problems()
+if _core_issues:
+    # Streamlit keeps imported modules in memory between reruns: try to reload them.
+    _core_issues = _core_problems(reload=True)
+
+if _core_issues:
+    st.set_page_config(page_title="E-PROM", page_icon="⚖️", layout="wide")
+    st.error(
+        "The files of this app are inconsistent (app.py and the core/ folder come "
+        "from different versions)."
+    )
+    st.markdown(
+        "**What to do:** upload the **whole** `core/` folder from the latest release "
+        "(not only some files) together with `app.py`, `GUIDE.md`, `requirements.txt` "
+        "and the `templates/` folder, commit, and then use *Manage app → Reboot app*."
+    )
+    st.code("\n".join(_core_issues))
+    st.stop()
+
+
 from core.analysis import (
     criterion_contributions,
     expert_agreement,
@@ -53,7 +145,7 @@ from core.validation import (
     validate_fahp_workbook,
 )
 
-APP_VERSION = "E-PROM v8.0"
+APP_VERSION = "E-PROM v8.0.1"
 
 
 st.set_page_config(
@@ -483,7 +575,7 @@ def mc_summary_df(data, mc):
 
 st.title("E-PROM")
 st.subheader(
-    "Express Fuzzy Preference Ranking with PROMETHEE — v8.0"
+    "Express Fuzzy Preference Ranking with PROMETHEE — v8.0.1"
 )
 st.caption(
     "FAHP-Express + Fuzzy PROMETHEE — generalized method."

@@ -1,4 +1,4 @@
-E-PROM v8.0 — analysis toolkit
+E-PROM v8.0.1 — analysis toolkit (core self-check added)
 New: input validation with cell-level report; save/load configuration (JSON); threshold assistant (q/p);
 criterion contribution and pairwise comparison; weight sensitivity with stability ranges; agreement among
 decision makers (Kendall W, Spearman), leave-one-out and rank-reversal checks; decision-maker weights;
