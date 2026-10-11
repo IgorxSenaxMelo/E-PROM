@@ -37,7 +37,12 @@ from core.flowsort import run_flowsort, suggest_profiles
 from core.fuzzy_numbers import defuzz_coa
 from core.labels import CONTINUOUS, ORDINAL
 from core.monte_carlo import run_e_prom_monte_carlo
-from core.portfolio import greedy_by_rank, solve_portfolio
+from core.portfolio import (
+    OBJECTIVE_MODES,
+    greedy_by_rank,
+    portfolio_values,
+    solve_portfolio,
+)
 from core.promethee import promethee_i_relation
 from core.report import build_report
 from core.thresholds import preference_curve, suggest_thresholds
@@ -2005,9 +2010,27 @@ if "result" in st.session_state:
         st.subheader("Portfolio selection — PROMETHEE V")
         st.markdown(
             "Choose the **best set** of alternatives rather than a single one: "
-            "maximize the total net flow of the selected alternatives subject to "
+            "maximize the total value of the selected alternatives subject to "
             "resource budgets, the number of alternatives and mandatory / excluded "
             "alternatives. The problem is solved exactly (integer programming)."
+        )
+
+        objective_label = st.radio(
+            "Objective",
+            list(OBJECTIVE_MODES.values()),
+            index=0,
+            key="pf_objective",
+            help=(
+                "Net flows of a set of alternatives always sum to zero, so with the "
+                "classic objective only alternatives with a positive net flow add "
+                "value and the optimum is often a very small portfolio. The shifted "
+                "objective gives every alternative a non-negative value, so the "
+                "budget and the number limits decide how many enter (it favours "
+                "larger portfolios)."
+            ),
+        )
+        objective_mode = next(
+            key for key, label_o in OBJECTIVE_MODES.items() if label_o == objective_label
         )
 
         mean_eval = np.mean(
@@ -2067,10 +2090,14 @@ if "result" in st.session_state:
                     must_exclude=[labels.index(x) for x in excl_labels],
                 )
                 phi_vec = np.asarray(result["phi_net"], dtype=float)
+                value_vec = portfolio_values(phi_vec, objective_mode)
                 st.session_state["portfolio"] = {
-                    "solution": solve_portfolio(phi_vec, **kwargs),
-                    "greedy": greedy_by_rank(phi_vec, **kwargs),
+                    "solution": solve_portfolio(value_vec, **kwargs),
+                    "greedy": greedy_by_rank(value_vec, **kwargs),
                     "resource_names": list(res_names),
+                    "mode": objective_mode,
+                    "values": value_vec,
+                    "kwargs_min_count": pf_min,
                 }
             except Exception as exc:
                 st.error(f"Portfolio selection failed: {exc}")
@@ -2083,9 +2110,15 @@ if "result" in st.session_state:
             if not sol["feasible"]:
                 st.error("No portfolio satisfies all the constraints. Relax a budget or the number limits.")
             else:
+                shifted = pf.get("mode") == "shifted"
+                values_used = np.asarray(pf.get("values", result["phi_net"]), dtype=float)
+
                 g1, g2, g3 = st.columns(3)
                 g1.metric("Selected alternatives", sol["count"])
-                g2.metric("Total net Phi (optimal)", f"{sol['objective']:.4f}")
+                g2.metric(
+                    "Total value (optimal)" if shifted else "Total net Phi (optimal)",
+                    f"{sol['objective']:.4f}",
+                )
                 g3.metric(
                     "Walking down the ranking",
                     f"{base['objective']:.4f}",
@@ -2099,14 +2132,39 @@ if "result" in st.session_state:
                         text=f"{label_r}: {used:,.2f} used of {bud:,.2f}",
                     )
 
-                pf_df = pd.DataFrame({
+                pf_table = {
                     "Alternative": labels,
                     "Net Phi": np.asarray(result["phi_net"], dtype=float),
+                }
+                if shifted:
+                    pf_table["Value used (Phi − lowest Phi)"] = values_used
+                pf_table.update({
                     "Position": np.asarray(result["rank_e_prom"], dtype=float),
                     "In optimal portfolio": ["✔" if s else "" for s in sol["selected"]],
                     "In ranking-order baseline": ["✔" if s else "" for s in base["selected"]],
-                }).sort_values("Position")
+                })
+                pf_df = pd.DataFrame(pf_table).sort_values("Position")
                 st.dataframe(pf_df, use_container_width=True, hide_index=True)
+
+                n_positive = int(np.sum(values_used > 1e-12))
+                usage_full = [
+                    (used / bud) if bud > 0 else 0.0
+                    for used, bud in zip(sol["usage"], sol["budgets"])
+                ]
+                budget_binding = any(u > 0.999 for u in usage_full)
+                if (
+                    not shifted
+                    and sol["count"] <= max(n_positive, int(pf.get("kwargs_min_count", 0)))
+                    and not budget_binding
+                    and sol["count"] < len(labels)
+                ):
+                    st.info(
+                        "With the classic objective, net flows sum to zero, so only "
+                        "alternatives with a positive net flow add value: the optimum "
+                        f"keeps {sol['count']} of {len(labels)} even though the budget is "
+                        "not exhausted. Use the **shifted** objective to let the budget "
+                        "and the number limits decide the size of the portfolio."
+                    )
                 st.caption(
                     "The ranking-order baseline walks down the ranking and keeps every "
                     "alternative that still fits. The optimum can beat it because a "

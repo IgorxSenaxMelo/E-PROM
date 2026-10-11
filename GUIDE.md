@@ -417,6 +417,11 @@ When you can pick several alternatives, ranking is not enough. PROMETHEE V maxim
 - a minimum and maximum **number** of alternatives;
 - **mandatory** and **excluded** alternatives.
 
+The **objective** can be:
+
+- **Net flow** (classic): the sum of the net flows of the selected alternatives. Net flows of a set of alternatives sum to zero, so only alternatives with a **positive** net flow add value. The optimum is therefore often small (even a single alternative) and the budget may not be exhausted — that is correct, not an error.
+- **Shifted net flow** (net flow minus the lowest net flow): every alternative has a non-negative value, so the budget and the number limits decide how many alternatives enter. It favours larger portfolios; use it when you want to fill the budget with the best available set.
+
 The problem is solved exactly as a 0-1 integer program. The result is compared with the *ranking-order baseline* (walk down the ranking keeping what still fits): the optimum can be better because a lower-ranked alternative may use the budget more efficiently. Alternatives with a negative net flow are chosen only when needed to reach the minimum number.
 
 ### 8.9 PDF report

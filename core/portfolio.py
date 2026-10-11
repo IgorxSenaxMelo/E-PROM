@@ -153,3 +153,27 @@ def greedy_by_rank(
         "usage": (A @ x) if A.shape[0] else np.zeros(0),
         "count": int(x.sum()),
     }
+
+
+OBJECTIVE_MODES = {
+    "net": "Net flow (classic PROMETHEE V)",
+    "shifted": "Shifted net flow (net flow minus the lowest net flow)",
+}
+
+
+def portfolio_values(phi, mode="net"):
+    """Value of each alternative in the portfolio objective.
+
+    net      -> the net flow itself (classic PROMETHEE V). Net flows sum to zero,
+                so only alternatives with a positive flow add value; extra
+                alternatives are chosen only to satisfy a minimum number.
+    shifted  -> net flow minus the lowest net flow. Every alternative has a
+                non-negative value, so the budget and the number limits (not the
+                sign of the flow) decide how many alternatives enter.
+    """
+    phi = np.asarray(phi, dtype=float)
+    if mode == "net":
+        return phi.copy()
+    if mode == "shifted":
+        return phi - phi.min()
+    raise ValueError(f"Unknown objective mode: {mode!r}")

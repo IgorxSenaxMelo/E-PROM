@@ -306,8 +306,12 @@ def build_report(data, result, config_df, fahp, extras=None, config_json=None, v
             story.append(Paragraph("No feasible portfolio for the stated constraints.", st["body"]))
         else:
             sol, base = pf["solution"], pf.get("greedy")
+            shifted = pf.get("mode") == "shifted"
             story.append(Paragraph(_safe(
-                f"Optimal portfolio: {sol['count']} alternative(s), total net flow {sol['objective']:.4f}"
+                "Objective: " + ("shifted net flow (net flow minus the lowest net flow)." if shifted else "net flow (classic PROMETHEE V).")
+            ), st["small"]))
+            story.append(Paragraph(_safe(
+                f"Optimal portfolio: {sol['count']} alternative(s), total {'value' if shifted else 'net flow'} {sol['objective']:.4f}"
                 + (f" (ranking-order baseline: {base['objective']:.4f})." if base else ".")
             ), st["body"]))
             for label, use, bud in zip(pf["resource_names"], sol["usage"], sol["budgets"]):

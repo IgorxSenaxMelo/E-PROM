@@ -354,3 +354,17 @@ def test_report_pdf_is_generated():
         "agreement": expert_agreement(res["phi_net_experts"], res["expert_names"]),
     })
     assert pdf[:4] == b"%PDF" and len(pdf) > 5000
+
+
+def test_portfolio_objective_modes():
+    from core.portfolio import portfolio_values
+    phi = np.array([0.30, 0.10, -0.10, -0.30])
+    cost = np.array([40.0, 30.0, 20.0, 10.0])
+    assert np.allclose(portfolio_values(phi, "shifted"), [0.6, 0.4, 0.2, 0.0])
+    classic = solve_portfolio(portfolio_values(phi, "net"), [cost], [100.0])
+    shifted = solve_portfolio(portfolio_values(phi, "shifted"), [cost], [100.0])
+    assert list(classic["selected"]) == [1, 1, 0, 0]        # only positive flows add value
+    assert shifted["count"] >= classic["count"]
+    assert shifted["usage"][0] <= 100.0 + 1e-9
+    with pytest.raises(ValueError):
+        portfolio_values(phi, "bad")
