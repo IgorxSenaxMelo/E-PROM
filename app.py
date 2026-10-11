@@ -427,7 +427,7 @@ def mc_summary_df(data, mc):
 
 st.title("E-PROM")
 st.subheader(
-    "Express Fuzzy Preference Ranking with PROMETHEE — v7.3"
+    "Express Fuzzy Preference Ranking with PROMETHEE — v7.4"
 )
 st.caption(
     "FAHP-Express + Fuzzy PROMETHEE — generalized method."
@@ -484,6 +484,12 @@ GUIDE_TEXT = (
     if GUIDE_PATH.exists()
     else "GUIDE.md was not found in the package."
 )
+
+# Show the guide on the start screen (before any result exists). After a run,
+# it is available in the "Guide" tab.
+if "result" not in st.session_state:
+    with st.expander("📘 User guide", expanded=True):
+        st.markdown(GUIDE_TEXT)
 
 
 
